@@ -22,6 +22,7 @@ import { IpPacraBridge } from './components/IpPacraBridge';
 import { DesignMarketplace } from './components/DesignMarketplace';
 import { ForeignDesignGateway } from './components/ForeignDesignGateway';
 import { DeveloperGovernance } from './components/DeveloperGovernance';
+import { SovereignCommonsHub } from './components/SovereignCommonsHub';
 import { NotificationToastContainer } from './components/NotificationToast';
 
 export default function App() {
@@ -319,6 +320,10 @@ export default function App() {
 
         {activeTab === 'platform_hub' && (
           <MicroservicesWorkflowHub />
+        )}
+
+        {activeTab === 'sovereign_commons' && (
+          <SovereignCommonsHub />
         )}
 
         {activeTab === 'ledger' && (

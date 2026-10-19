@@ -114,6 +114,8 @@ export interface EscrowDisbursementResult {
     beneficiary_id: string;
     amount: number;
     currency: string;
+    balance_before: number;
+    balance_after: number;
     steward_permit: string;
     policy_hash: string;
     status: 'DISBURSED';
@@ -732,6 +734,11 @@ export class DurableStore {
     return acc;
   }
 
+  public getEscrow(accountId: string): { account_id: string; subject_id: string; balance: number; currency: string; epoch: number } | null {
+    const acc = this.db.prepare('SELECT * FROM escrow_accounts WHERE account_id = ?').get(accountId) as any;
+    return acc || null;
+  }
+
   // --- Fail-Closed Escrow Disbursement with Dual-State Receipt Invariant ---
   public disburseEscrowWithDualStateReceipt(params: {
     operation_id: string;
@@ -1122,6 +1129,8 @@ export class DurableStore {
     if (allowedFields.includes('receipts') && escrow) {
       packet.escrow_summary = {
         account_id: escrow.account_id,
+        subject_id: escrow.subject_id,
+        balance: escrow.balance,
         current_balance: escrow.balance,
         currency: escrow.currency,
         epoch: escrow.epoch,
@@ -1147,7 +1156,10 @@ export class DurableStore {
     return packet;
   }
 
-  public getDualStateReceipts(subjectId: string): DualStateReceipt[] {
-    return this.db.prepare('SELECT * FROM dual_state_receipts WHERE subject_id = ? ORDER BY epoch DESC').all(subjectId) as unknown as DualStateReceipt[];
+  public getDualStateReceipts(subjectId?: string): DualStateReceipt[] {
+    if (subjectId) {
+      return this.db.prepare('SELECT * FROM dual_state_receipts WHERE subject_id = ? ORDER BY epoch DESC').all(subjectId) as unknown as DualStateReceipt[];
+    }
+    return this.db.prepare('SELECT * FROM dual_state_receipts ORDER BY created_at DESC LIMIT 100').all() as unknown as DualStateReceipt[];
   }
 }

@@ -182,9 +182,18 @@ export const Navbar: React.FC<NavbarProps> = ({
             <span>QR Plaque</span>
           </button>
           <button
+            onClick={() => setActiveTab('sovereign_commons')}
+            className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 ${
+              activeTab === 'sovereign_commons' ? 'bg-emerald-500 text-neutral-950 font-bold shadow-md' : 'text-emerald-400 hover:text-emerald-300 bg-emerald-950/60 border border-emerald-700/60'
+            }`}
+          >
+            <Scale className="w-3.5 h-3.5" />
+            <span>Sovereign Commons (SFLive)</span>
+          </button>
+          <button
             onClick={() => setActiveTab('platform_hub')}
             className={`px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1 ${
-              activeTab === 'platform_hub' ? 'bg-emerald-600 text-white font-bold' : 'text-emerald-400 hover:text-emerald-300 bg-emerald-950/40 border border-emerald-800/60'
+              activeTab === 'platform_hub' ? 'bg-neutral-800 text-emerald-300 font-medium' : 'text-neutral-400 hover:text-neutral-200'
             }`}
           >
             <Cpu className="w-3.5 h-3.5" />

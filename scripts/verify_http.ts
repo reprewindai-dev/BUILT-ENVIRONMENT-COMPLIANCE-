@@ -576,7 +576,101 @@ async function runTests() {
     assert.strictEqual(ledgerVerifJson.verification.valid, true);
     console.log('   [PASS] HTTP 200: Ledger chain verified cryptographically (' + ledgerVerifJson.verification.totalBlocks + ' blocks).');
 
-    console.log('\n>>> ALL 20 HTTP RUNTIME ENDPOINT INVARIANTS VERIFIED LIVE! <<<');
+    // -------------------------------------------------------------------------
+    // 15. GraphQL Institutional Gateway Verification
+    // -------------------------------------------------------------------------
+    console.log('\n20. [GraphQL] Testing Institutional GraphQL Gateway Query (Provenance & Packet)...');
+    const gqlQuery = `
+      query GetInstitutionalOverview($subjectId: String!) {
+        datasetProvenance {
+          dataset_id
+          title
+          data_classification
+          limitations
+        }
+        understandingPacket(subjectId: $subjectId) {
+          subject_id
+          power_state
+          escrow_summary {
+            account_id
+            balance
+            currency
+          }
+          narrative_summary {
+            what_was_promised
+            what_changed_financial
+          }
+          ledger_proof {
+            total_blocks
+            latest_hash
+          }
+        }
+      }
+    `;
+
+    const gqlRes = await fetch(`${BASE_URL}/graphql`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${stewardToken}`
+      },
+      body: JSON.stringify({
+        query: gqlQuery,
+        variables: { subjectId: 'CIVIC-HTTP-01' }
+      })
+    });
+
+    if (gqlRes.status !== 200) {
+      const errText = await gqlRes.text();
+      console.error('GraphQL Response Error Body:', errText);
+    }
+    assert.strictEqual(gqlRes.status, 200);
+    const gqlBody = await gqlRes.json();
+    assert.ok(!gqlBody.errors, `GraphQL errors: ${JSON.stringify(gqlBody.errors)}`);
+    assert.ok(gqlBody.data);
+    assert.ok(gqlBody.data.datasetProvenance.length >= 2);
+    assert.strictEqual(gqlBody.data.understandingPacket.subject_id, 'CIVIC-HTTP-01');
+    assert.strictEqual(gqlBody.data.understandingPacket.escrow_summary.account_id, 'ESCROW-HTTP-01');
+    assert.strictEqual(gqlBody.data.understandingPacket.escrow_summary.balance, 25000);
+    console.log('   [PASS] GraphQL 200: Provenance and UnderstandingPacket query executed cleanly over /graphql.');
+
+    console.log('\n21. [GraphQL] Testing AI Capacity Proposal via GraphQL Gate...');
+    const gqlAiQuery = `
+      query GetAiProposal($subjectId: String!, $need: String!) {
+        sovereignCapacityProposal(subjectId: $subjectId, needDescription: $need) {
+          agent
+          target_subject
+          consequence_firewall_status
+          claim_boundary
+          estimated_vouchers_needed
+          matched_artisan
+        }
+      }
+    `;
+
+    const gqlAiRes = await fetch(`${BASE_URL}/graphql`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${councilToken}`
+      },
+      body: JSON.stringify({
+        query: gqlAiQuery,
+        variables: {
+          subjectId: 'CIVIC-HTTP-01',
+          need: 'Solar array maintenance for clinic'
+        }
+      })
+    });
+
+    assert.strictEqual(gqlAiRes.status, 200);
+    const gqlAiBody = await gqlAiRes.json();
+    assert.ok(!gqlAiBody.errors, `GraphQL errors: ${JSON.stringify(gqlAiBody.errors)}`);
+    assert.strictEqual(gqlAiBody.data.sovereignCapacityProposal.target_subject, 'CIVIC-HTTP-01');
+    assert.ok(gqlAiBody.data.sovereignCapacityProposal.consequence_firewall_status.includes('DENIED'));
+    console.log('   [PASS] GraphQL 200: AI Capacity Proposal verified with strict Consequence Firewall status.');
+
+    console.log('\n>>> ALL 22 HTTP & GRAPHQL RUNTIME ENDPOINT INVARIANTS VERIFIED LIVE! <<<');
   } finally {
     console.log('\nShutting down server process...');
     if (serverProcess.pid) {

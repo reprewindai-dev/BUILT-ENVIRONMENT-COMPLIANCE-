@@ -2573,10 +2573,80 @@ app.post('/api/notary', (req, res) => {
 });
 
 // ============================================================================
-// 6. SERVER INITIALIZATION & VITE SPA INTEGRATION
+// 6. APOLLO GRAPHQL INSTITUTIONAL GATEWAY & SERVER INITIALIZATION
 // ============================================================================
 async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
+
+  // Mount Apollo Server on /graphql
+  try {
+    const { ApolloServer, HeaderMap } = await import('@apollo/server');
+    const { typeDefs } = await import('./src/graphql/schema.js');
+    const { resolvers } = await import('./src/graphql/resolvers.js');
+
+    const apolloServer = new ApolloServer({
+      typeDefs,
+      resolvers
+    });
+
+    await apolloServer.start();
+
+    app.use('/graphql', express.json(), async (req: express.Request, res: express.Response) => {
+      const headers = new HeaderMap();
+      for (const [key, value] of Object.entries(req.headers)) {
+        if (value !== undefined) {
+          headers.set(key, Array.isArray(value) ? value.join(', ') : value);
+        }
+      }
+
+      const authHeader = req.headers.authorization;
+      let caller: AuthenticatedCaller | null = null;
+      if (authHeader && authHeader.startsWith('Bearer ')) {
+        const token = authHeader.substring(7).trim();
+        const payload = verifySignedPayload(token);
+        if (payload && (!payload.exp || payload.exp >= Math.floor(Date.now() / 1000))) {
+          const caller_id = payload.caller_id || payload.sub;
+          const role = (payload.role || '').toUpperCase() as AuthenticatedCaller['role'];
+          if (caller_id && role) {
+            caller = {
+              caller_id,
+              role,
+              subject_id: payload.subject_id,
+              issued_at: payload.issued_at || new Date().toISOString()
+            };
+          }
+        }
+      }
+
+      const httpGraphQLResponse = await apolloServer.executeHTTPGraphQLRequest({
+        httpGraphQLRequest: {
+          method: req.method.toUpperCase(),
+          headers,
+          search: req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '',
+          body: req.body
+        },
+        context: async () => ({ req, caller })
+      });
+
+      for (const [headerKey, headerVal] of httpGraphQLResponse.headers) {
+        res.setHeader(headerKey, headerVal);
+      }
+      res.status(httpGraphQLResponse.status || 200);
+
+      if (httpGraphQLResponse.body.kind === 'complete') {
+        res.send(httpGraphQLResponse.body.string);
+      } else {
+        for await (const chunk of httpGraphQLResponse.body.asyncIterator) {
+          res.write(chunk);
+        }
+        res.end();
+      }
+    });
+
+    console.log('[Apollo GraphQL Gateway] Mounted at /graphql with institutional schema.');
+  } catch (err: any) {
+    console.warn('[Apollo GraphQL Gateway] Failed to mount Apollo Server:', err.message);
+  }
 
   if (!isProd) {
     const vite = await createViteServer({
