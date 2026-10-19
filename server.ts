@@ -10,7 +10,10 @@ import {
   CrossSubjectBindingError,
   OperationConflictError,
   PowerStateTransitionError,
-  InsufficientBalanceError
+  InsufficientBalanceError,
+  InvalidAmountError,
+  ReplayPayloadMismatchError,
+  UnauthorizedCallerError
 } from './src/services/durableStore.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -65,6 +68,80 @@ export function verifySignedPayload(token: string): any | null {
   } catch {
     return null;
   }
+}
+
+// ============================================================================
+// 1b. SESSION AUTHENTICATION & AUTHORITY BOUNDARY MIDDLEWARE
+// ============================================================================
+export interface AuthenticatedCaller {
+  caller_id: string;
+  role: 'SYSTEM_ADMIN' | 'COUNCIL_OFFICER' | 'COMMUNITY_STEWARD' | 'AUDITOR';
+  subject_id?: string;
+  issued_at: string;
+}
+
+export function createAuthToken(caller: AuthenticatedCaller): string {
+  return signPayload(caller);
+}
+
+export function requireAuthority(allowedRoles?: ('SYSTEM_ADMIN' | 'COUNCIL_OFFICER' | 'COMMUNITY_STEWARD' | 'AUDITOR')[]) {
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        error: 'UnauthorizedCallerError',
+        message: 'Authentication required: missing or malformed Bearer token.',
+        delta_c: 0
+      });
+    }
+
+    const token = authHeader.substring(7).trim();
+    const payload = verifySignedPayload(token);
+    if (!payload) {
+      return res.status(401).json({
+        error: 'UnauthorizedCallerError',
+        message: 'Authentication failed: invalid cryptographic caller token or expired signature.',
+        delta_c: 0
+      });
+    }
+
+    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
+      return res.status(401).json({
+        error: 'UnauthorizedCallerError',
+        message: 'Authentication failed: token has expired.',
+        delta_c: 0
+      });
+    }
+
+    const caller_id = payload.caller_id || payload.sub;
+    const role = (payload.role || '').toUpperCase() as AuthenticatedCaller['role'];
+
+    if (!caller_id || !role) {
+      return res.status(401).json({
+        error: 'UnauthorizedCallerError',
+        message: 'Authentication failed: token payload missing required caller identity or role.',
+        delta_c: 0
+      });
+    }
+
+    const caller: AuthenticatedCaller = {
+      caller_id,
+      role,
+      subject_id: payload.subject_id,
+      issued_at: payload.issued_at || (payload.iat ? new Date(payload.iat * 1000).toISOString() : new Date().toISOString())
+    };
+
+    if (allowedRoles && allowedRoles.length > 0 && !allowedRoles.includes(caller.role)) {
+      return res.status(403).json({
+        error: 'UnauthorizedCallerError',
+        message: `Forbidden: caller role ${caller.role} lacks required permission (${allowedRoles.join(', ')}).`,
+        delta_c: 0
+      });
+    }
+
+    (req as any).caller = caller;
+    next();
+  };
 }
 
 // ============================================================================
@@ -998,8 +1075,54 @@ app.post('/api/payments/simulate', async (req, res) => {
 // Governed by Veklom Continuity Framework & Fail-Closed Invariants
 // ============================================================================
 
+// Authority Token Issuance (Service-to-Service / Admin Coordinator)
+app.post('/api/auth/authority-token', (req, res) => {
+  try {
+    const { secret, caller_id, role, subject_id } = req.body;
+    const signingSecret = getSigningSecret();
+
+    if (!secret || secret !== signingSecret) {
+      return res.status(401).json({
+        error: 'UnauthorizedCallerError',
+        message: 'Authority token issuance denied: invalid or missing system signing secret.',
+        delta_c: 0
+      });
+    }
+
+    if (!caller_id || !role) {
+      return res.status(400).json({
+        error: 'InvalidParametersError',
+        message: 'caller_id and role are required.'
+      });
+    }
+
+    const validRoles = ['SYSTEM_ADMIN', 'COUNCIL_OFFICER', 'COMMUNITY_STEWARD', 'AUDITOR'];
+    if (!validRoles.includes(role)) {
+      return res.status(400).json({
+        error: 'InvalidRoleError',
+        message: `Invalid role ${role}. Valid roles: ${validRoles.join(', ')}`
+      });
+    }
+
+    const token = createAuthToken({
+      caller_id,
+      role: role as any,
+      subject_id,
+      issued_at: new Date().toISOString()
+    });
+
+    res.status(201).json({
+      access_token: token,
+      token_type: 'Bearer',
+      caller: { caller_id, role, subject_id }
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.name, message: err.message });
+  }
+});
+
 // Register or query Subject Authority & Power State (D0-D3)
-app.post('/api/authority/subject', (req, res) => {
+app.post('/api/authority/subject', requireAuthority(['SYSTEM_ADMIN', 'COUNCIL_OFFICER']), (req, res) => {
   try {
     const { subject_id = 'CIVIC-COMMUNITY-01', initial_epoch = 1, power_state = 'D0' } = req.body;
     const activeIncarnation = durableStore.registerSubject(subject_id, initial_epoch, power_state);
@@ -1011,7 +1134,8 @@ app.post('/api/authority/subject', (req, res) => {
       registered_at: new Date().toISOString()
     });
   } catch (err: any) {
-    res.status(400).json({ error: err.name, message: err.message });
+    const statusCode = err.name === 'OperationConflictError' ? 409 : 400;
+    res.status(statusCode).json({ error: err.name, message: err.message });
   }
 });
 
@@ -1022,13 +1146,14 @@ app.get('/api/authority/subject/:subjectId', (req, res) => {
 });
 
 // Power State Governance Transition (D0 <-> D1/D2 <-> D3)
-app.post('/api/authority/power-state', (req, res) => {
+app.post('/api/authority/power-state', requireAuthority(['SYSTEM_ADMIN', 'COUNCIL_OFFICER']), (req, res) => {
   try {
-    const { subject_id, target_state } = req.body;
+    const { subject_id, target_state, wake_signature } = req.body;
     if (!subject_id || !target_state) {
       return res.status(400).json({ error: 'subject_id and target_state are required' });
     }
-    durableStore.transitionPowerState(subject_id, target_state);
+    const secret = getSigningSecret();
+    durableStore.transitionPowerState(subject_id, target_state, { secret, signature: wake_signature });
     res.json({
       success: true,
       subject_id,
@@ -1042,7 +1167,7 @@ app.post('/api/authority/power-state', (req, res) => {
 });
 
 // Monotonic Epoch Advancement (Permit Retirement & Invalidation)
-app.post('/api/authority/advance-epoch', (req, res) => {
+app.post('/api/authority/advance-epoch', requireAuthority(['SYSTEM_ADMIN', 'COUNCIL_OFFICER']), (req, res) => {
   try {
     const { subject_id } = req.body;
     if (!subject_id) return res.status(400).json({ error: 'subject_id is required' });
@@ -1059,7 +1184,7 @@ app.post('/api/authority/advance-epoch', (req, res) => {
 });
 
 // Worker Binding Endpoint (Worker In Subject)
-app.post('/api/authority/bind-worker', (req, res) => {
+app.post('/api/authority/bind-worker', requireAuthority(['SYSTEM_ADMIN', 'COUNCIL_OFFICER']), (req, res) => {
   try {
     const { worker_id, subject_id, incarnation_id, role = 'COMMUNITY_STEWARD', power_state = 'D0' } = req.body;
     if (!worker_id || !subject_id || !incarnation_id) {
@@ -1080,12 +1205,14 @@ app.post('/api/authority/bind-worker', (req, res) => {
 });
 
 // Commitments: Create & Read Durable Community Commitment Pools
-app.post('/api/commitments', (req, res) => {
+app.post('/api/commitments', requireAuthority(['SYSTEM_ADMIN', 'COUNCIL_OFFICER', 'COMMUNITY_STEWARD']), (req, res) => {
   try {
+    const caller = (req as any).caller as AuthenticatedCaller;
+    const steward_id = caller.role === 'SYSTEM_ADMIN' ? (req.body.steward_id || caller.caller_id) : caller.caller_id;
+
     const {
       pool_id = 'POOL-SFLIVE-001',
-      subject_id = 'CIVIC-COMMUNITY-01',
-      steward_id = 'STEWARD-001',
+      subject_id = caller.subject_id || 'CIVIC-COMMUNITY-01',
       amount = 5000,
       currency = 'COMMONS',
       purpose = 'Community Solar Microgrid Installation',
@@ -1120,8 +1247,8 @@ app.get('/api/commitments', (req, res) => {
   res.json({ count: list.length, commitments: list });
 });
 
-// Statutory Permits: Issue Cryptographically Signed Monotonic Epoch Permit
-app.post('/api/permits', (req, res) => {
+// Statutory Permits: Issue Cryptographically Signed Monotonic Epoch Permit (Council / Admin only)
+app.post('/api/permits', requireAuthority(['SYSTEM_ADMIN', 'COUNCIL_OFFICER']), (req, res) => {
   try {
     const {
       submission_id = 'SUB-COMMUNITY-01',
@@ -1151,8 +1278,8 @@ app.post('/api/permits', (req, res) => {
   }
 });
 
-// Escrow Setup
-app.post('/api/escrow/init', (req, res) => {
+// Escrow Setup (Admin / Council only)
+app.post('/api/escrow/init', requireAuthority(['SYSTEM_ADMIN', 'COUNCIL_OFFICER']), (req, res) => {
   try {
     const { account_id = 'ESCROW-CIVIC-01', subject_id = 'CIVIC-COMMUNITY-01', initial_balance = 50000, currency = 'COMMONS' } = req.body;
     const account = durableStore.getOrCreateEscrow(account_id, subject_id, Number(initial_balance), currency);
@@ -1163,13 +1290,27 @@ app.post('/api/escrow/init', (req, res) => {
 });
 
 // FAIL-CLOSED ESCROW DISBURSEMENT (ΔC = 0 Gate with Dual-State Cryptographic Receipt)
-app.post('/api/escrow/:id/disburse', (req, res) => {
+app.post('/api/escrow/:id/disburse', requireAuthority(['SYSTEM_ADMIN', 'COUNCIL_OFFICER', 'COMMUNITY_STEWARD']), (req, res) => {
   try {
     const accountId = req.params.id;
+    const caller = (req as any).caller as AuthenticatedCaller;
+
+    // Caller identity is derived from authenticated session unless caller has SYSTEM_ADMIN role
+    const worker_id = caller.role === 'SYSTEM_ADMIN'
+      ? (req.body.worker_id || caller.caller_id)
+      : caller.caller_id;
+
+    if (req.body.worker_id && req.body.worker_id !== worker_id && caller.role !== 'SYSTEM_ADMIN') {
+      return res.status(403).json({
+        error: 'UnauthorizedCallerError',
+        message: `Disbursement forbidden: authenticated caller (${caller.caller_id}) cannot execute disbursement under distinct identity (${req.body.worker_id}).`,
+        delta_c: 0
+      });
+    }
+
     const {
       operation_id,
       subject_id,
-      worker_id,
       steward_permit_id,
       beneficiary_id,
       amount,
@@ -1177,7 +1318,7 @@ app.post('/api/escrow/:id/disburse', (req, res) => {
       policy_hash
     } = req.body;
 
-    if (!operation_id || !subject_id || !worker_id || !steward_permit_id || !beneficiary_id || !amount || !policy_hash) {
+    if (!operation_id || !subject_id || !worker_id || !steward_permit_id || !beneficiary_id || amount === undefined || amount === null || !policy_hash) {
       return res.status(400).json({
         error: 'MissingMandatoryFieldsError',
         message: 'Disbursement rejected: operation_id, subject_id, worker_id, steward_permit_id, beneficiary_id, amount, and policy_hash are strictly mandatory. ΔC = 0.'
@@ -1208,9 +1349,13 @@ app.post('/api/escrow/:id/disburse', (req, res) => {
   } catch (err: any) {
     let statusCode = 400;
     if (err.name === 'CrossSubjectBindingError') statusCode = 403;
+    else if (err.name === 'UnauthorizedCallerError') statusCode = 403;
     else if (err.name === 'PowerStateTransitionError') statusCode = 403;
     else if (err.name === 'StalePermitError') statusCode = 409;
+    else if (err.name === 'OperationConflictError') statusCode = 409;
+    else if (err.name === 'ReplayPayloadMismatchError') statusCode = 409;
     else if (err.name === 'InsufficientBalanceError') statusCode = 422;
+    else if (err.name === 'InvalidAmountError') statusCode = 422;
     else if (err.name === 'InvalidPermitError') statusCode = 401;
 
     res.status(statusCode).json({
@@ -1240,19 +1385,26 @@ app.get('/api/disclosure/understanding-packet/:subjectId', (req, res) => {
 });
 
 // --- Delivery Evidence Layer (Layer 4) ---
-app.post('/api/evidence/attach', (req, res) => {
+app.post('/api/evidence/attach', requireAuthority(['SYSTEM_ADMIN', 'COUNCIL_OFFICER', 'COMMUNITY_STEWARD', 'AUDITOR']), (req, res) => {
   try {
+    const caller = (req as any).caller as AuthenticatedCaller;
+    const steward_id = caller.role === 'SYSTEM_ADMIN' ? (req.body.steward_id || caller.caller_id) : caller.caller_id;
+
+    let status = req.body.status || 'SUBMITTED';
+    // If caller is COMMUNITY_STEWARD, downgrade self-asserted VERIFIED to SUBMITTED pending audit
+    if (caller.role === 'COMMUNITY_STEWARD' && status === 'VERIFIED') {
+      status = 'SUBMITTED';
+    }
+
     const {
       commitment_id,
-      subject_id = 'CIVIC-COMMUNITY-01',
-      steward_id = 'WORKER-STEWARD-01',
+      subject_id = caller.subject_id || 'CIVIC-COMMUNITY-01',
       evidence_type = 'INSPECTION_REPORT',
       title,
       description,
       dataset_id,
       file_hash,
-      evidence_url = 'https://civictrust.network/evidence/default.pdf',
-      status = 'VERIFIED'
+      evidence_url = 'https://civictrust.network/evidence/default.pdf'
     } = req.body;
 
     if (!commitment_id || !title || !description || !file_hash) {
@@ -1282,6 +1434,25 @@ app.post('/api/evidence/attach', (req, res) => {
     });
   } catch (err: any) {
     res.status(400).json({ error: err.name, message: err.message });
+  }
+});
+
+// Verify Delivery Evidence (Auditor / Council Officer / System Admin only)
+app.post('/api/evidence/:id/verify', requireAuthority(['SYSTEM_ADMIN', 'COUNCIL_OFFICER', 'AUDITOR']), (req, res) => {
+  try {
+    const caller = (req as any).caller as AuthenticatedCaller;
+    const evidenceId = req.params.id;
+    const notes = req.body.notes;
+
+    const record = durableStore.verifyEvidence(evidenceId, caller.caller_id, notes);
+    res.status(200).json({
+      success: true,
+      message: 'Delivery evidence independently audited and verified.',
+      evidence: record
+    });
+  } catch (err: any) {
+    const status = err.name === 'InvalidPermitError' ? 404 : 400;
+    res.status(status).json({ error: err.name, message: err.message });
   }
 });
 

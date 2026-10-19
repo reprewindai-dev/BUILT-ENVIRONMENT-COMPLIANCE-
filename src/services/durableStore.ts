@@ -47,6 +47,27 @@ export class InsufficientBalanceError extends Error {
   }
 }
 
+export class InvalidAmountError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidAmountError';
+  }
+}
+
+export class ReplayPayloadMismatchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ReplayPayloadMismatchError';
+  }
+}
+
+export class UnauthorizedCallerError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UnauthorizedCallerError';
+  }
+}
+
 export interface DurableBlock {
   seq: number;
   event_id: string;
@@ -483,17 +504,25 @@ export class DurableStore {
 
   // --- Authority, Incarnations & Worker Bindings ---
   public registerSubject(subjectId: string, initialEpoch = 1, powerState: 'D0' | 'D1' | 'D2' | 'D3hot' | 'D3cold' = 'D0'): string {
+    const existing = this.getSubject(subjectId);
+    if (existing) {
+      throw new OperationConflictError(`Subject ${subjectId} is already registered with monotonic epoch ${existing.current_epoch}. Overwrite is forbidden.`);
+    }
+
     const incarnation = crypto.randomBytes(24).toString('hex');
     const now = new Date().toISOString();
     this.db.prepare(`
       INSERT INTO authority_epochs (subject_id, current_epoch, active_incarnation, power_state, updated_at)
       VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(subject_id) DO UPDATE SET
-        current_epoch = excluded.current_epoch,
-        active_incarnation = excluded.active_incarnation,
-        power_state = excluded.power_state,
-        updated_at = excluded.updated_at
     `).run(subjectId, initialEpoch, incarnation, powerState, now);
+
+    this.appendLedgerBlock('SUBJECT_AUTHORITY_REGISTERED', {
+      subject_id: subjectId,
+      epoch: initialEpoch,
+      incarnation_id: incarnation,
+      power_state: powerState
+    });
+
     return incarnation;
   }
 
@@ -502,19 +531,49 @@ export class DurableStore {
     return row || null;
   }
 
-  public transitionPowerState(subjectId: string, targetState: 'D0' | 'D1' | 'D2' | 'D3hot' | 'D3cold'): void {
+  public transitionPowerState(
+    subjectId: string,
+    targetState: 'D0' | 'D1' | 'D2' | 'D3hot' | 'D3cold',
+    wakeProof?: { signature: string; secret: string; capability_grant_id?: string }
+  ): void {
     const subject = this.getSubject(subjectId);
     if (!subject) throw new InvalidPermitError(`Subject ${subjectId} not found`);
 
-    const current = subject.power_state;
-    // Low-power re-entry must pass through verification boundary (Invariant)
-    if ((current === 'D3hot' || current === 'D3cold') && (targetState === 'D1' || targetState === 'D2')) {
-      throw new PowerStateTransitionError(`Forbidden power transition: ${current} cannot transition to ${targetState} without re-entering D0`);
+    const current = subject.power_state as 'D0' | 'D1' | 'D2' | 'D3hot' | 'D3cold';
+    if (current === targetState) return;
+
+    // Canonical Transition Table according to Continuity Skill 2.0:
+    // D0 -> D1 (Allowed)
+    // D0 -> D2 (Allowed)
+    // D0 -> D3hot (Allowed)
+    // D1 -> D0 (Allowed)
+    // D2 -> D0 (Allowed)
+    // D1 -> D3hot (Allowed)
+    // D2 -> D3hot (Allowed)
+    // D3hot -> D3cold (Allowed)
+    // D3cold -> D0 (Allowed ONLY with verified wake proof)
+    // D3hot -> D1 / D2 (FORBIDDEN)
+    // D3cold -> D1 / D2 (FORBIDDEN)
+    // D3hot -> D0 without wake proof (FORBIDDEN)
+
+    const isLowPowerD3 = (current === 'D3hot' || current === 'D3cold');
+    if (isLowPowerD3 && (targetState === 'D1' || targetState === 'D2')) {
+      throw new PowerStateTransitionError(`Forbidden power transition: ${current} cannot transition to ${targetState} without passing through verified D0 re-entry`);
+    }
+
+    if (isLowPowerD3 && targetState === 'D0') {
+      if (!wakeProof || !wakeProof.signature || !wakeProof.secret) {
+        throw new PowerStateTransitionError(`Wake verification failed: Re-entry from ${current} to D0 strictly requires cryptographic wake authorization`);
+      }
+      const expectedWakeSig = crypto.createHmac('sha256', wakeProof.secret).update(`WAKE:${subjectId}:${subject.current_epoch}:${subject.active_incarnation}`).digest('hex');
+      if (wakeProof.signature !== expectedWakeSig) {
+        throw new PowerStateTransitionError('Wake verification failed: Invalid cryptographic wake signature');
+      }
     }
 
     const now = new Date().toISOString();
     this.db.prepare('UPDATE authority_epochs SET power_state = ?, updated_at = ? WHERE subject_id = ?').run(targetState, now, subjectId);
-    this.appendLedgerBlock('POWER_STATE_TRANSITION', { subject_id: subjectId, from: current, to: targetState });
+    this.appendLedgerBlock('POWER_STATE_TRANSITION', { subject_id: subjectId, from: current, to: targetState, verified_wake: isLowPowerD3 && targetState === 'D0' });
   }
 
   public advanceEpoch(subjectId: string): number {
@@ -686,64 +745,109 @@ export class DurableStore {
     policy_hash: string;
     secret: string;
   }): EscrowDisbursementResult {
-    // 1. Idempotency Check: Return existing receipt immediately if operation was already committed
-    const existingReceipt = this.db.prepare('SELECT * FROM dual_state_receipts WHERE operation_id = ?').get(params.operation_id) as unknown as DualStateReceipt | undefined;
-    if (existingReceipt) {
-      const existingDisb = this.getKV<any>('escrow_disbursements', params.operation_id);
-      return { receipt: existingReceipt, disbursement: existingDisb };
+    // 0. Strict Finite Positive Amount Validation
+    if (
+      typeof params.amount !== 'number' ||
+      !Number.isFinite(params.amount) ||
+      Number.isNaN(params.amount) ||
+      params.amount <= 0 ||
+      params.amount > 1_000_000_000
+    ) {
+      throw new InvalidAmountError(`Disbursement amount must be a positive finite number: received ${params.amount}`);
     }
 
-    // 2. Cross-Subject Binding Check (Worker in Subject)
-    const worker = this.db.prepare('SELECT * FROM worker_bindings WHERE worker_id = ?').get(params.worker_id) as any;
-    if (!worker) {
-      throw new CrossSubjectBindingError(`Worker ${params.worker_id} is not registered`);
-    }
-    if (worker.subject_id !== params.subject_id) {
-      throw new CrossSubjectBindingError(`Cross-subject violation: worker ${params.worker_id} belongs to ${worker.subject_id}, but request targets ${params.subject_id}`);
-    }
-
-    // 3. Subject Power State & Incarnation Freshness Check
-    const subject = this.getSubject(params.subject_id);
-    if (!subject) throw new InvalidPermitError(`Subject ${params.subject_id} not found`);
-    if (subject.power_state !== 'D0') {
-      throw new PowerStateTransitionError(`Consequence denied: Subject ${params.subject_id} is in power state ${subject.power_state}; ΔC must equal 0`);
-    }
-    if (worker.incarnation_id !== subject.active_incarnation) {
-      throw new StalePermitError(`Worker incarnation ${worker.incarnation_id} is stale; active is ${subject.active_incarnation}`);
-    }
-
-    // 4. Validate Permit & Signature
-    const permit = this.db.prepare('SELECT * FROM statutory_permits WHERE permit_id = ?').get(params.steward_permit_id) as any;
-    if (!permit) {
-      throw new InvalidPermitError(`Steward permit ${params.steward_permit_id} not found`);
-    }
-    if (permit.status !== 'ACTIVE') {
-      throw new InvalidPermitError(`Permit ${params.steward_permit_id} is ${permit.status}; cannot execute`);
-    }
-    if (permit.subject_id !== params.subject_id) {
-      throw new CrossSubjectBindingError(`Permit subject ${permit.subject_id} does not match request subject ${params.subject_id}`);
-    }
-    if (permit.epoch !== subject.current_epoch) {
-      throw new StalePermitError(`Permit epoch ${permit.epoch} is retired; subject epoch is ${subject.current_epoch}`);
-    }
-
-    const expectedSignaturePayload = `${permit.permit_id}:${permit.submission_id}:${permit.subject_id}:${permit.epoch}:${permit.incarnation_id}:${permit.policy_hash}`;
-    const expectedSig = crypto.createHmac('sha256', params.secret).update(expectedSignaturePayload).digest('hex');
-    if (permit.signature !== expectedSig) {
-      throw new InvalidPermitError('Cryptographic permit signature invalid');
-    }
-
-    if (params.policy_hash !== permit.policy_hash) {
-      throw new InvalidPermitError('Execution policy hash does not match signed permit policy hash');
-    }
-
-    // 5. Begin Atomic Immediate Sink Transaction (Sink-level guard)
+    // 1. Begin Atomic Immediate Sink Transaction (Sink-level guard encapsulates replay check and mutation)
     this.db.exec('BEGIN IMMEDIATE;');
     try {
+      // 2. Replay Check: Within the atomic transaction, verify canonical request digest
+      const canonicalPayload = JSON.stringify({
+        account_id: params.account_id,
+        subject_id: params.subject_id,
+        worker_id: params.worker_id,
+        steward_permit_id: params.steward_permit_id,
+        beneficiary_id: params.beneficiary_id,
+        amount: params.amount,
+        currency: params.currency,
+        policy_hash: params.policy_hash
+      });
+      const canonicalDigest = crypto.createHash('sha256').update(canonicalPayload).digest('hex');
+
+      const existingReceipt = this.db.prepare('SELECT * FROM dual_state_receipts WHERE operation_id = ?').get(params.operation_id) as unknown as DualStateReceipt | undefined;
+      if (existingReceipt) {
+        const existingDisb = this.getKV<any>('escrow_disbursements', params.operation_id);
+        // Verify replay payload matches exact canonical parameters (reject replay attack with different payload)
+        if (
+          existingDisb &&
+          (existingDisb.amount !== params.amount ||
+            existingDisb.beneficiary_id !== params.beneficiary_id ||
+            existingDisb.currency !== params.currency)
+        ) {
+          throw new ReplayPayloadMismatchError(`Operation ID ${params.operation_id} already committed with different disbursement parameters.`);
+        }
+        this.db.exec('COMMIT;');
+        return { receipt: existingReceipt, disbursement: existingDisb };
+      }
+
+      // 3. Cross-Subject Binding Check (Worker in Subject)
+      const worker = this.db.prepare('SELECT * FROM worker_bindings WHERE worker_id = ?').get(params.worker_id) as any;
+      if (!worker) {
+        throw new CrossSubjectBindingError(`Worker ${params.worker_id} is not registered`);
+      }
+      if (worker.subject_id !== params.subject_id) {
+        throw new CrossSubjectBindingError(`Cross-subject violation: worker ${params.worker_id} belongs to ${worker.subject_id}, but request targets ${params.subject_id}`);
+      }
+
+      // 4. Subject Power State & Incarnation Freshness Check
+      const subject = this.getSubject(params.subject_id);
+      if (!subject) throw new InvalidPermitError(`Subject ${params.subject_id} not found`);
+      if (subject.power_state !== 'D0') {
+        throw new PowerStateTransitionError(`Consequence denied: Subject ${params.subject_id} is in power state ${subject.power_state}; ΔC must equal 0`);
+      }
+      if (worker.incarnation_id !== subject.active_incarnation) {
+        throw new StalePermitError(`Worker incarnation ${worker.incarnation_id} is stale; active is ${subject.active_incarnation}`);
+      }
+
+      // 5. Escrow Account Ownership & Currency Invariant
       const escrow = this.db.prepare('SELECT * FROM escrow_accounts WHERE account_id = ?').get(params.account_id) as any;
       if (!escrow) {
         throw new InvalidPermitError(`Escrow account ${params.account_id} not found`);
       }
+      if (escrow.subject_id !== params.subject_id) {
+        throw new CrossSubjectBindingError(`Escrow account ${params.account_id} belongs to subject ${escrow.subject_id}, but request is authorized under subject ${params.subject_id}`);
+      }
+      if (escrow.currency !== params.currency) {
+        throw new InvalidPermitError(`Escrow currency mismatch: account currency is ${escrow.currency}, but request specified ${params.currency}`);
+      }
+
+      // 6. Validate Permit & Signature
+      const permit = this.db.prepare('SELECT * FROM statutory_permits WHERE permit_id = ?').get(params.steward_permit_id) as any;
+      if (!permit) {
+        throw new InvalidPermitError(`Steward permit ${params.steward_permit_id} not found`);
+      }
+      if (permit.status !== 'ACTIVE') {
+        throw new InvalidPermitError(`Permit ${params.steward_permit_id} is ${permit.status}; cannot execute`);
+      }
+      if (permit.subject_id !== params.subject_id) {
+        throw new CrossSubjectBindingError(`Permit subject ${permit.subject_id} does not match request subject ${params.subject_id}`);
+      }
+      if (permit.scope !== 'ESCROW_DISBURSE_HARMONIZED' && permit.scope !== 'ESCROW_DISBURSE') {
+        throw new InvalidPermitError(`Permit scope '${permit.scope}' does not authorize escrow disbursement (required: ESCROW_DISBURSE_HARMONIZED)`);
+      }
+      if (permit.epoch !== subject.current_epoch) {
+        throw new StalePermitError(`Permit epoch ${permit.epoch} is retired; subject epoch is ${subject.current_epoch}`);
+      }
+
+      const expectedSignaturePayload = `${permit.permit_id}:${permit.submission_id}:${permit.subject_id}:${permit.epoch}:${permit.incarnation_id}:${permit.policy_hash}`;
+      const expectedSig = crypto.createHmac('sha256', params.secret).update(expectedSignaturePayload).digest('hex');
+      if (permit.signature !== expectedSig) {
+        throw new InvalidPermitError('Cryptographic permit signature invalid');
+      }
+
+      if (params.policy_hash !== permit.policy_hash) {
+        throw new InvalidPermitError('Execution policy hash does not match signed permit policy hash');
+      }
+
+      // 7. Verify Escrow Balance Constraint
       if (escrow.balance < params.amount) {
         throw new InsufficientBalanceError(`Insufficient escrow balance: ${escrow.balance} < ${params.amount}`);
       }
@@ -889,6 +993,21 @@ export class DurableStore {
     return record;
   }
 
+  public verifyEvidence(evidenceId: string, verifierId: string, notes?: string): DeliveryEvidence {
+    const existing = this.db.prepare('SELECT * FROM delivery_evidence WHERE evidence_id = ?').get(evidenceId) as any;
+    if (!existing) {
+      throw new InvalidPermitError(`Delivery evidence ${evidenceId} not found`);
+    }
+    this.db.prepare('UPDATE delivery_evidence SET status = ? WHERE evidence_id = ?').run('VERIFIED', evidenceId);
+    this.appendLedgerBlock('DELIVERY_EVIDENCE_VERIFIED', {
+      evidence_id: evidenceId,
+      verifier_id: verifierId,
+      notes: notes || null,
+      verified_at: new Date().toISOString()
+    });
+    return { ...existing, status: 'VERIFIED' };
+  }
+
   public getEvidence(commitmentId?: string, subjectId?: string): DeliveryEvidence[] {
     if (commitmentId) {
       return this.db.prepare('SELECT * FROM delivery_evidence WHERE commitment_id = ? ORDER BY created_at DESC').all(commitmentId) as unknown as DeliveryEvidence[];
@@ -947,49 +1066,68 @@ export class DurableStore {
     const totalDisbursed = receipts.reduce((sum, r) => sum + (r.delta_c || 0), 0);
     const openCommitments = commitments.filter(c => c.status === 'PENDING' || c.status === 'COMMITTED');
 
-    // Human-and-Machine Readable Executive Understanding Narrative
-    const narrative_summary = {
-      what_was_promised: commitments.length > 0
+    // Segregate evidence counts strictly by verification status
+    const verifiedEvidence = evidence.filter(e => e.status === 'VERIFIED');
+    const submittedEvidence = evidence.filter(e => e.status === 'SUBMITTED');
+    const contestedEvidence = evidence.filter(e => e.status === 'CONTESTED');
+
+    // Human-and-Machine Readable Executive Understanding Narrative (Respects consented field allow-list)
+    const narrative_summary: Record<string, string> = {};
+    if (allowedFields.includes('commitments')) {
+      narrative_summary.what_was_promised = commitments.length > 0
         ? commitments.map(c => `[${c.id}] ${c.purpose} (${c.amount} ${c.currency})`).join('; ')
-        : 'No commitments registered yet for this subject.',
-      who_approved: permits.length > 0
-        ? permits.map(p => `Permit ${p.permit_id} authorized by ${p.authority} in Monotonic Epoch ${p.epoch} (${p.status})`).join('; ')
-        : 'No statutory permits recorded.',
-      what_was_delivered: evidence.length > 0
-        ? evidence.map(e => `[${e.evidence_type}] ${e.title}: ${e.description} (${e.status})`).join('; ')
-        : 'Delivery evidence pending completion.',
-      what_changed_financial: receipts.length > 0
-        ? `${receipts.length} dual-state receipt(s) verified. Total consequence disbursed: ${totalDisbursed} ${escrow?.currency || 'COMMONS'}. Current active balance: ${escrow?.balance ?? 'N/A'}.`
-        : 'No financial mutations recorded; protected balance untouched.',
-      what_remains_open: openCommitments.length > 0
+        : 'No commitments registered yet for this subject.';
+      narrative_summary.what_remains_open = openCommitments.length > 0
         ? `${openCommitments.length} commitment(s) open or in progress (${openCommitments.map(o => o.id).join(', ')}).`
-        : 'All registered commitments fulfilled and closed.',
-      data_sources_and_limitations: provenance.length > 0
+        : 'All registered commitments fulfilled and closed.';
+    }
+    if (allowedFields.includes('permits')) {
+      narrative_summary.who_approved = permits.length > 0
+        ? permits.map(p => `Permit ${p.permit_id} authorized by ${p.authority} in Monotonic Epoch ${p.epoch} (${p.status})`).join('; ')
+        : 'No statutory permits recorded.';
+    }
+    if (allowedFields.includes('evidence')) {
+      narrative_summary.what_was_delivered = evidence.length > 0
+        ? evidence.map(e => `[${e.evidence_type}] ${e.title}: ${e.description} (${e.status}; Boundary: ${e.claim_boundary})`).join('; ')
+        : 'Delivery evidence pending completion.';
+    }
+    if (allowedFields.includes('receipts')) {
+      narrative_summary.what_changed_financial = receipts.length > 0
+        ? `${receipts.length} dual-state receipt(s) verified. Total consequence disbursed: ${totalDisbursed} ${escrow?.currency || 'COMMONS'}. Current active balance: ${escrow?.balance ?? 'N/A'}.`
+        : 'No financial mutations recorded; protected balance untouched.';
+    }
+    if (allowedFields.includes('data_sources_and_limitations')) {
+      narrative_summary.data_sources_and_limitations = provenance.length > 0
         ? provenance.map(pr => `[${pr.data_classification}] ${pr.title} (Publisher: ${pr.publisher}; Verification: ${pr.verification_status}; Limitation: ${pr.limitations})`).join(' | ')
-        : 'No dataset provenance recorded.'
-    };
+        : 'No dataset provenance recorded.';
+    }
 
     const packet: any = {
       subject_id: subjectId,
       epoch: subject.current_epoch,
       power_state: subject.power_state,
-      escrow_summary: escrow ? {
+      narrative_summary,
+      metrics: {
+        total_commitments: allowedFields.includes('commitments') ? commitments.length : undefined,
+        total_committed_amount: allowedFields.includes('commitments') ? totalCommitted : undefined,
+        total_disbursed_amount: allowedFields.includes('receipts') ? totalDisbursed : undefined,
+        verified_evidence_count: allowedFields.includes('evidence') ? verifiedEvidence.length : undefined,
+        submitted_evidence_count: allowedFields.includes('evidence') ? submittedEvidence.length : undefined,
+        contested_evidence_count: allowedFields.includes('evidence') ? contestedEvidence.length : undefined,
+        open_commitments_count: allowedFields.includes('commitments') ? openCommitments.length : undefined
+      },
+      generated_at: new Date().toISOString()
+    };
+
+    if (allowedFields.includes('receipts') && escrow) {
+      packet.escrow_summary = {
         account_id: escrow.account_id,
         current_balance: escrow.balance,
         currency: escrow.currency,
         epoch: escrow.epoch,
         updated_at: escrow.updated_at
-      } : null,
-      narrative_summary,
-      metrics: {
-        total_commitments: commitments.length,
-        total_committed_amount: totalCommitted,
-        total_disbursed_amount: totalDisbursed,
-        verified_evidence_count: evidence.length,
-        open_commitments_count: openCommitments.length
-      },
-      generated_at: new Date().toISOString()
-    };
+      };
+    }
 
     if (allowedFields.includes('commitments')) packet.commitments = commitments;
     if (allowedFields.includes('permits')) packet.permits = permits;

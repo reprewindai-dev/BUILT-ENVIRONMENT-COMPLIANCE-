@@ -3,8 +3,11 @@ import {
   InvalidPermitError,
   StalePermitError,
   CrossSubjectBindingError,
+  OperationConflictError,
   PowerStateTransitionError,
-  InsufficientBalanceError
+  InsufficientBalanceError,
+  InvalidAmountError,
+  ReplayPayloadMismatchError
 } from '../src/services/durableStore.js';
 import path from 'path';
 import fs from 'fs';
@@ -62,6 +65,21 @@ assert.strictEqual(sub1?.subject_id, subjectId);
 assert.strictEqual(sub1?.current_epoch, 1);
 assert.strictEqual(sub1?.power_state, 'D0');
 console.log('   [PASS] Subject registered in D0 with incarnation: ' + incarnationId.substring(0, 12) + '...');
+
+console.log('\n2b. [Adversarial] Attack: Attempt duplicate registration of existing subject to overwrite epoch...');
+let duplicateRegRejected = false;
+try {
+  store.registerSubject(subjectId, 999, 'D0');
+} catch (err: any) {
+  if (err instanceof OperationConflictError) {
+    duplicateRegRejected = true;
+    console.log('   [PASS] Caught typed OperationConflictError: ' + err.message);
+  }
+}
+assert.strictEqual(duplicateRegRejected, true, 'Duplicate subject registration must be rejected fail-closed');
+const subUnchanged = store.getSubject(subjectId);
+assert.strictEqual(subUnchanged?.current_epoch, 1, 'Subject epoch must not be overwritten');
+console.log('   [PASS] Monotonic subject authority invariant verified: epoch remains 1.');
 
 console.log('\n3. Binding legitimate Community Steward Worker & Recording Community Commitment...');
 const worker1 = 'WORKER-STEWARD-01';
@@ -211,6 +229,109 @@ assert.strictEqual(overdraftRejected, true, 'Overdraft must be rejected fail-clo
 assert.strictEqual(store.getOrCreateEscrow('ESCROW-001', subjectId).balance, 20000, 'Balance untouched: ΔC = 0');
 console.log('   [PASS] Financial sink guard verified: ΔC = 0 (Balance: 20000).');
 
+console.log('\n9b. [Adversarial] Attack with negative, zero, and non-finite disbursement amounts...');
+for (const badAmount of [-5000, 0, NaN, Infinity, -0.01]) {
+  let badAmountRejected = false;
+  try {
+    store.disburseEscrowWithDualStateReceipt({
+      operation_id: `OP-ATTACK-BAD-AMT-${String(badAmount)}`,
+      account_id: 'ESCROW-001',
+      subject_id: subjectId,
+      worker_id: worker1,
+      steward_permit_id: 'PMT-001',
+      beneficiary_id: 'BEN-EVIL',
+      amount: badAmount,
+      currency: 'COMMONS',
+      policy_hash: policyHash,
+      secret
+    });
+  } catch (err: any) {
+    if (err instanceof InvalidAmountError) {
+      badAmountRejected = true;
+    }
+  }
+  assert.strictEqual(badAmountRejected, true, `Disbursement amount ${badAmount} must be rejected with InvalidAmountError`);
+}
+assert.strictEqual(store.getOrCreateEscrow('ESCROW-001', subjectId).balance, 20000, 'Balance untouched: ΔC = 0');
+console.log('   [PASS] Strict positive finite amount invariant verified: ΔC = 0 (Balance: 20000).');
+
+console.log('\n9c. [Adversarial] Attack: Disburse using permit with unauthorized scope (e.g. PLANNING_INSPECTION_ONLY)...');
+const readOnlyPermit = store.issuePermit({
+  permit_id: 'PMT-READONLY-01',
+  submission_id: 'SUB-READONLY',
+  subject_id: subjectId,
+  authority: 'CIVICTRUST_GATEWAY',
+  scope: 'PLANNING_INSPECTION_ONLY',
+  policy_hash: policyHash,
+  secret
+});
+let unauthorizedScopeRejected = false;
+try {
+  store.disburseEscrowWithDualStateReceipt({
+    operation_id: 'OP-ATTACK-BAD-SCOPE',
+    account_id: 'ESCROW-001',
+    subject_id: subjectId,
+    worker_id: worker1,
+    steward_permit_id: 'PMT-READONLY-01',
+    beneficiary_id: 'BEN-001',
+    amount: 1000,
+    currency: 'COMMONS',
+    policy_hash: policyHash,
+    secret
+  });
+} catch (err: any) {
+  if (err instanceof InvalidPermitError) {
+    unauthorizedScopeRejected = true;
+    console.log('   [PASS] Caught typed InvalidPermitError: ' + err.message);
+  }
+}
+assert.strictEqual(unauthorizedScopeRejected, true, 'Unauthorized permit scope must be rejected');
+assert.strictEqual(store.getOrCreateEscrow('ESCROW-001', subjectId).balance, 20000, 'Balance untouched: ΔC = 0');
+console.log('   [PASS] Permit scope authorization boundary verified: ΔC = 0 (Balance: 20000).');
+
+console.log('\n9d. [Adversarial] Attack: Cross-subject escrow debit (Steward of Community B attempting to debit Community A escrow)...');
+const subjectB = 'CIVIC-COMMUNITY-02';
+const incB = store.registerSubject(subjectB, 1, 'D0');
+const workerB = 'WORKER-STEWARD-B';
+store.bindWorker(workerB, subjectB, incB, 'COMMUNITY_STEWARD', 'D0');
+const escrowB = store.getOrCreateEscrow('ESCROW-002', subjectB, 10000, 'COMMONS');
+
+const permitB = store.issuePermit({
+  permit_id: 'PMT-COMMUNITY-B-01',
+  submission_id: 'SUB-B-001',
+  subject_id: subjectB,
+  authority: 'CIVICTRUST_GATEWAY',
+  scope: 'ESCROW_DISBURSE_HARMONIZED',
+  policy_hash: policyHash,
+  secret
+});
+
+let crossSubjectEscrowRejected = false;
+try {
+  // Worker B, authorized for Subject B, specifies Subject B in authorization but points to ESCROW-001 (owned by Subject A)
+  store.disburseEscrowWithDualStateReceipt({
+    operation_id: 'OP-ATTACK-CROSS-ESCROW',
+    account_id: 'ESCROW-001', // Owned by Subject A (CIVIC-COMMUNITY-01)
+    subject_id: subjectB,     // Worker authorized under Subject B
+    worker_id: workerB,
+    steward_permit_id: 'PMT-COMMUNITY-B-01',
+    beneficiary_id: 'BEN-COMMUNITY-B',
+    amount: 5000,
+    currency: 'COMMONS',
+    policy_hash: policyHash,
+    secret
+  });
+} catch (err: any) {
+  if (err instanceof CrossSubjectBindingError) {
+    crossSubjectEscrowRejected = true;
+    console.log('   [PASS] Caught typed CrossSubjectBindingError: ' + err.message);
+  }
+}
+assert.strictEqual(crossSubjectEscrowRejected, true, 'Cross-subject escrow attack must be rejected fail-closed');
+assert.strictEqual(store.getOrCreateEscrow('ESCROW-001', subjectId).balance, 20000, 'Subject A escrow untouched: ΔC = 0');
+assert.strictEqual(store.getOrCreateEscrow('ESCROW-002', subjectB).balance, 10000, 'Subject B escrow untouched: ΔC = 0');
+console.log('   [PASS] Escrow account isolation verified: cross-subject debit blocked, ΔC = 0 on both accounts.');
+
 // -------------------------------------------------------------------------
 // PHASE 4: VALID DISBURSEMENT & DUAL-STATE RECEIPT
 // -------------------------------------------------------------------------
@@ -263,6 +384,31 @@ assert.strictEqual(resultReplay.receipt.receipt_id, result1.receipt.receipt_id);
 const escrowAfterReplay = store.getOrCreateEscrow('ESCROW-001', subjectId);
 assert.strictEqual(escrowAfterReplay.balance, 16000, 'Replay must not duplicate deductions');
 console.log('   [PASS] Idempotency verified: identical receipt returned, balance remains 16000.');
+
+console.log('\n11b. [Adversarial] Attack: Idempotent replay with altered payload (tampered beneficiary or amount)...');
+let alteredPayloadRejected = false;
+try {
+  store.disburseEscrowWithDualStateReceipt({
+    operation_id: opValidId, // Same operation_id
+    account_id: 'ESCROW-001',
+    subject_id: subjectId,
+    worker_id: worker1,
+    steward_permit_id: 'PMT-001',
+    beneficiary_id: 'BEN-EVIL-TAMPERED', // Altered beneficiary
+    amount: 4000,
+    currency: 'COMMONS',
+    policy_hash: policyHash,
+    secret
+  });
+} catch (err: any) {
+  if (err instanceof ReplayPayloadMismatchError) {
+    alteredPayloadRejected = true;
+    console.log('   [PASS] Caught typed ReplayPayloadMismatchError: ' + err.message);
+  }
+}
+assert.strictEqual(alteredPayloadRejected, true, 'Replay with altered payload must be rejected fail-closed');
+assert.strictEqual(store.getOrCreateEscrow('ESCROW-001', subjectId).balance, 16000, 'Balance remains 16000: ΔC = 0');
+console.log('   [PASS] Replay payload integrity verified: altered payload rejected, ΔC = 0.');
 
 // -------------------------------------------------------------------------
 // PHASE 6: MONOTONIC EPOCH ADVANCEMENT & RETIREMENT OF STALE PERMITS
@@ -361,6 +507,25 @@ assert.strictEqual(evidenceRecord.status, 'VERIFIED');
 assert.ok(evidenceRecord.evidence_id.startsWith('EVD-'));
 console.log('   [PASS] Delivery evidence physically anchored: ' + evidenceRecord.evidence_id);
 
+console.log('\n14b. Delivery Evidence Segregation & Independent Audit Verification...');
+const submittedEvidence = store.recordEvidence({
+  commitment_id: opValidId,
+  subject_id: subjectId,
+  steward_id: worker1,
+  evidence_type: 'PHOTO',
+  title: 'Chilenje Market Rooftop Pre-Installation Photo',
+  description: 'Initial site assessment photograph submitted by community steward.',
+  file_hash: 'sha256-photo-hash-initial-site',
+  evidence_url: 'https://civictrust.network/evidence/site-photo.jpg'
+  // status defaults to 'SUBMITTED'
+});
+assert.strictEqual(submittedEvidence.status, 'SUBMITTED', 'Evidence without audit must default to SUBMITTED');
+console.log('   [PASS] Unverified steward evidence defaults to SUBMITTED: ' + submittedEvidence.evidence_id);
+
+const auditedEvidence = store.verifyEvidence(submittedEvidence.evidence_id, 'COUNCIL-OFFICER-01', 'Inspected and confirmed against council building permit.');
+assert.strictEqual(auditedEvidence.status, 'VERIFIED');
+console.log('   [PASS] Independent officer audit transitioned evidence status to VERIFIED.');
+
 console.log('\n15. Verifying Dataset Provenance & Limitations Audit...');
 const provenanceList = store.getDatasetProvenance();
 assert.ok(provenanceList.length >= 2);
@@ -396,6 +561,19 @@ console.log('          - What Changed (ΔC): ' + packet.narrative_summary.what_c
 console.log('          - Dual-State Receipts Audited: ' + packet.receipts.length);
 console.log('          - Latest Proof Hash: ' + packet.ledger_proof.latest_hash);
 
+console.log('\n17b. Testing Consented Field Filtering in Understanding Packet (Data-Minimization)...');
+const minimalPacket = store.generateUnderstandingPacket(subjectId, ['commitments', 'evidence']);
+assert.strictEqual(minimalPacket.subject_id, subjectId);
+assert.ok(minimalPacket.commitments);
+assert.ok(minimalPacket.delivery_evidence);
+assert.strictEqual(minimalPacket.receipts, undefined, 'Unconsented receipts must not be returned');
+assert.strictEqual(minimalPacket.permits, undefined, 'Unconsented permits must not be returned');
+assert.strictEqual(minimalPacket.narrative_summary.who_approved, undefined, 'Unconsented who_approved narrative must not be returned');
+assert.ok(minimalPacket.narrative_summary.what_was_promised, 'Consented narrative present');
+assert.ok(minimalPacket.metrics.verified_evidence_count !== undefined);
+assert.ok(minimalPacket.metrics.submitted_evidence_count !== undefined);
+console.log('   [PASS] Consented field filtering verified: unrequested receipts/permits masked, evidence counts segregated.');
+
 // -------------------------------------------------------------------------
 // PHASE 10: FULL PROCESS RESTART & COLD-BOOT PERSISTENCE
 // -------------------------------------------------------------------------
@@ -414,8 +592,7 @@ const restartedReceipts = restartedStore.getDualStateReceipts(subjectId);
 assert.strictEqual(restartedReceipts.length, 1);
 assert.strictEqual(restartedReceipts[0].operation_id, opValidId);
 const restartedEvidence = restartedStore.getEvidence(undefined, subjectId);
-assert.strictEqual(restartedEvidence.length, 1);
-assert.strictEqual(restartedEvidence[0].title, 'Chilenje Market 25kW Solar Grid Commissioning Report');
+assert.ok(restartedEvidence.length >= 2);
 console.log('   [PASS] Cold boot recovery verified: subject, epoch, escrow balance (16000), receipts, evidence, and ledger chain intact.');
 
-console.log('\n>>> ALL 18 PHYSICAL RUNTIME INVARIANTS TESTED & VERIFIED WITH ZERO MOCKS! <<<');
+console.log('\n>>> ALL 24 PHYSICAL RUNTIME INVARIANTS TESTED & VERIFIED WITH ZERO MOCKS! <<<');
