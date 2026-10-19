@@ -65,6 +65,42 @@ export class AuditLedgerService {
     return [...this.blocks];
   }
 
+  public static async fetchServerLedger(): Promise<AuditBlock[]> {
+    try {
+      const res = await fetch('/api/ledger');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.ledger) && data.ledger.length > 0) {
+          const mapped: AuditBlock[] = data.ledger.map((b: any) => {
+            let payload: any = {};
+            try {
+              payload = typeof b.payload_json === 'string' ? JSON.parse(b.payload_json) : (b.payload || {});
+            } catch {
+              payload = b.payload || {};
+            }
+            return {
+              index: b.seq,
+              timestamp: b.created_at,
+              eventType: b.event_type as any,
+              actorId: payload.actorId || payload.submission_id || 'SERVER-DURABLE',
+              actorName: payload.actorName || payload.authority || 'Sovereign Ledger',
+              actorRole: payload.actorRole || 'Durable Consensus Sink',
+              projectId: payload.projectId || payload.project_id || 'PRJ-ZAPE-DURABLE',
+              previousBlockHash: b.previous_hash,
+              blockHash: b.hash,
+              dataSummary: typeof payload === 'string' ? payload : JSON.stringify(payload).substring(0, 120)
+            };
+          });
+          this.blocks = mapped;
+          return [...this.blocks];
+        }
+      }
+    } catch {
+      // Return local cache on network error
+    }
+    return [...this.blocks];
+  }
+
   public static async recordEvent(
     eventType: AuditBlock['eventType'],
     actor: { id: string; name: string; role: string },
@@ -94,6 +130,25 @@ export class AuditLedgerService {
     };
 
     this.blocks.push(newBlock);
+
+    // Optionally notify server
+    try {
+      await fetch('/api/notary', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          documentName: `${eventType}-${projectId}`,
+          fileHash: blockHash,
+          architectName: actor.name,
+          ziaNumber: actor.id,
+          nrcNumber: 'N/A',
+          legalAttestation: summary
+        })
+      });
+    } catch {
+      // Best-effort push to server
+    }
+
     return newBlock;
   }
 }

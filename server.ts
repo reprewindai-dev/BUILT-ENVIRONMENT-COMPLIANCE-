@@ -3,6 +3,15 @@ import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
+import {
+  DurableStore,
+  InvalidPermitError,
+  StalePermitError,
+  CrossSubjectBindingError,
+  OperationConflictError,
+  PowerStateTransitionError,
+  InsufficientBalanceError
+} from './src/services/durableStore.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,6 +21,9 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
 
 app.use(express.json());
 
+// Initialize SQLite durable storage engine
+export const durableStore = new DurableStore(process.env.DB_PATH);
+
 // ============================================================================
 // 1. CRYPTO & SHA-256 TRUST LAYER (W3C Verifiable Credentials & HMAC Signatures)
 // ============================================================================
@@ -19,8 +31,16 @@ export function sha256(input: string): string {
   return crypto.createHash('sha256').update(input).digest('hex');
 }
 
+export function getSigningSecret(): string {
+  const secret = process.env.JWT_SECRET;
+  if (!secret || secret.trim() === '') {
+    throw new InvalidPermitError('FATAL: JWT_SECRET environment variable is missing or empty. Server fails closed.');
+  }
+  return secret;
+}
+
 export function signPayload(payload: object): string {
-  const secret = process.env.JWT_SECRET || 'zape-sovereign-secret-2026';
+  const secret = getSigningSecret();
   const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
   const signature = crypto
     .createHmac('sha256', secret)
@@ -30,7 +50,7 @@ export function signPayload(payload: object): string {
 }
 
 export function verifySignedPayload(token: string): any | null {
-  const secret = process.env.JWT_SECRET || 'zape-sovereign-secret-2026';
+  const secret = getSigningSecret();
   const [body, signature] = token.split('.');
   if (!body || !signature) return null;
 
@@ -243,34 +263,23 @@ DB.fiware_entities.set('ZAPE:Parcel:LUSAKA/100/22', {
   coordinates: { value: { lat: -15.416, lng: 28.282 }, type: 'GeoProperty' }
 });
 
-// Cryptographic Ledger Append
+// Cryptographic Ledger Append (Backed by SQLite durableStore)
 export async function appendToLedger(eventType: string, payload: any): Promise<LedgerBlock> {
-  const previousHash = DB.ledger.length > 0 
-    ? DB.ledger[DB.ledger.length - 1].hash 
-    : 'GENESIS-0000000000000000000000000000000000000000000000000000000000000000';
-  
-  const hash = sha256(previousHash + JSON.stringify(payload) + eventType);
+  const durableBlock = durableStore.appendLedgerBlock(eventType, payload);
 
   const block: LedgerBlock = {
-    seq: DB.ledger.length + 1,
-    event_id: crypto.randomUUID(),
-    event_type: eventType,
+    seq: durableBlock.seq,
+    event_id: durableBlock.event_id,
+    event_type: durableBlock.event_type,
     payload,
-    previous_hash: previousHash,
-    hash,
-    created_at: new Date().toISOString()
+    previous_hash: durableBlock.previous_hash,
+    hash: durableBlock.hash,
+    created_at: durableBlock.created_at
   };
 
   DB.ledger.push(block);
   return block;
 }
-
-// Initial Genesis Block
-appendToLedger('SYSTEM_GENESIS', {
-  message: 'ZAPE 3.0 National Sovereign Built-Environment Ledger Initialized',
-  jurisdiction: 'Republic of Zambia',
-  authorities: ['ZIA', 'EIZ', 'NCC', 'PACRA', 'LCC', 'MLG']
-});
 
 // ============================================================================
 // 4. WORKFLOW STATE MACHINE
@@ -932,41 +941,406 @@ app.post('/api/payments/invoice/:submissionId', async (req, res) => {
 });
 
 app.post('/api/payments/simulate', async (req, res) => {
-  const { invoice_id, method = 'MOBILE_MONEY' } = req.body;
-  const invoice = Array.from(DB.invoices.values()).find(i => i.id === invoice_id);
-  if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+  try {
+    const { invoice_id, method = 'MOBILE_MONEY', idempotency_key } = req.body;
+    if (!invoice_id) return res.status(400).json({ error: 'invoice_id is required' });
 
-  const payment = {
-    id: `PAY-${Date.now()}`,
-    invoice_id: invoice.id,
-    submission_id: invoice.submission_id,
-    payment_reference: `ZAPE-TXN-${Date.now()}`,
-    amount: invoice.total_amount,
-    currency: 'ZMW',
-    method,
-    status: 'COMPLETED',
-    created_at: new Date().toISOString()
+    const invoice = Array.from(DB.invoices.values()).find(i => i.id === invoice_id);
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+
+    // Enforce idempotency: if already paid, fail closed or return cached receipt without double settlement
+    if (invoice.status === 'PAID') {
+      const existingPayment = DB.payments.get(invoice.submission_id);
+      return res.status(200).json({
+        message: 'Invoice already settled. Idempotency preserved (ΔC = 0).',
+        payment: existingPayment
+      });
+    }
+
+    const payment = {
+      id: `PAY-${Date.now()}`,
+      invoice_id: invoice.id,
+      submission_id: invoice.submission_id,
+      payment_reference: idempotency_key || `ZAPE-TXN-${Date.now()}`,
+      amount: invoice.total_amount,
+      currency: 'ZMW',
+      method,
+      status: 'COMPLETED',
+      created_at: new Date().toISOString()
+    };
+
+    DB.payments.set(invoice.submission_id, payment);
+    invoice.status = 'PAID';
+
+    await appendToLedger('STATUTORY_PAYMENT_SETTLED', {
+      payment_id: payment.id,
+      invoice_id: invoice.id,
+      amount: payment.amount,
+      method,
+      idempotency_key
+    });
+
+    await emitCloudEvent(
+      Topics.PaymentCompleted,
+      'zape/payment-service',
+      invoice.submission_id,
+      payment
+    );
+
+    res.status(201).json(payment);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// DURABLE SERVER ENDPOINTS (COMMUNITY COMMITMENTS, PERMITS, ESCROW & DISCLOSURE)
+// Governed by Veklom Continuity Framework & Fail-Closed Invariants
+// ============================================================================
+
+// Register or query Subject Authority & Power State (D0-D3)
+app.post('/api/authority/subject', (req, res) => {
+  try {
+    const { subject_id = 'CIVIC-COMMUNITY-01', initial_epoch = 1, power_state = 'D0' } = req.body;
+    const activeIncarnation = durableStore.registerSubject(subject_id, initial_epoch, power_state);
+    res.status(201).json({
+      subject_id,
+      epoch: initial_epoch,
+      power_state,
+      active_incarnation: activeIncarnation,
+      registered_at: new Date().toISOString()
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.name, message: err.message });
+  }
+});
+
+app.get('/api/authority/subject/:subjectId', (req, res) => {
+  const subject = durableStore.getSubject(req.params.subjectId);
+  if (!subject) return res.status(404).json({ error: 'Subject not found' });
+  res.json(subject);
+});
+
+// Power State Governance Transition (D0 <-> D1/D2 <-> D3)
+app.post('/api/authority/power-state', (req, res) => {
+  try {
+    const { subject_id, target_state } = req.body;
+    if (!subject_id || !target_state) {
+      return res.status(400).json({ error: 'subject_id and target_state are required' });
+    }
+    durableStore.transitionPowerState(subject_id, target_state);
+    res.json({
+      success: true,
+      subject_id,
+      target_state,
+      transitioned_at: new Date().toISOString()
+    });
+  } catch (err: any) {
+    const statusCode = err.name === 'PowerStateTransitionError' ? 409 : 400;
+    res.status(statusCode).json({ error: err.name, message: err.message });
+  }
+});
+
+// Monotonic Epoch Advancement (Permit Retirement & Invalidation)
+app.post('/api/authority/advance-epoch', (req, res) => {
+  try {
+    const { subject_id } = req.body;
+    if (!subject_id) return res.status(400).json({ error: 'subject_id is required' });
+    const newEpoch = durableStore.advanceEpoch(subject_id);
+    res.json({
+      success: true,
+      subject_id,
+      new_epoch: newEpoch,
+      message: 'All previous epoch permits retired. Consequence boundary updated.'
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.name, message: err.message });
+  }
+});
+
+// Worker Binding Endpoint (Worker In Subject)
+app.post('/api/authority/bind-worker', (req, res) => {
+  try {
+    const { worker_id, subject_id, incarnation_id, role = 'COMMUNITY_STEWARD', power_state = 'D0' } = req.body;
+    if (!worker_id || !subject_id || !incarnation_id) {
+      return res.status(400).json({ error: 'worker_id, subject_id, and incarnation_id are required' });
+    }
+    durableStore.bindWorker(worker_id, subject_id, incarnation_id, role, power_state);
+    res.status(201).json({
+      success: true,
+      worker_id,
+      subject_id,
+      incarnation_id,
+      role,
+      power_state
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.name, message: err.message });
+  }
+});
+
+// Commitments: Create & Read Durable Community Commitment Pools
+app.post('/api/commitments', (req, res) => {
+  try {
+    const {
+      pool_id = 'POOL-SFLIVE-001',
+      subject_id = 'CIVIC-COMMUNITY-01',
+      steward_id = 'STEWARD-001',
+      amount = 5000,
+      currency = 'COMMONS',
+      purpose = 'Community Solar Microgrid Installation',
+      power_state = 'D0',
+      status = 'COMMITTED',
+      metadata = {}
+    } = req.body;
+
+    const commitment = durableStore.createCommitment({
+      id: `CMT-${crypto.randomUUID().substring(0, 8).toUpperCase()}`,
+      pool_id,
+      subject_id,
+      steward_id,
+      amount: Number(amount),
+      currency,
+      purpose,
+      power_state,
+      status,
+      metadata_json: JSON.stringify(metadata)
+    });
+
+    res.status(201).json(commitment);
+  } catch (err: any) {
+    const status = err.name === 'PowerStateTransitionError' ? 403 : 400;
+    res.status(status).json({ error: err.name, message: err.message });
+  }
+});
+
+app.get('/api/commitments', (req, res) => {
+  const poolId = req.query.pool_id as string | undefined;
+  const list = durableStore.getCommitments(poolId);
+  res.json({ count: list.length, commitments: list });
+});
+
+// Statutory Permits: Issue Cryptographically Signed Monotonic Epoch Permit
+app.post('/api/permits', (req, res) => {
+  try {
+    const {
+      submission_id = 'SUB-COMMUNITY-01',
+      subject_id = 'CIVIC-COMMUNITY-01',
+      authority = 'CIVICTRUST_COUNCIL_GATEWAY',
+      scope = 'ESCROW_DISBURSE_HARMONIZED',
+      policy_hash = sha256('POLICY-CIVICTRUST-ZAPE-PASS')
+    } = req.body;
+
+    const permitId = req.body.permit_id || `PMT-${crypto.randomUUID().substring(0, 8).toUpperCase()}`;
+    const secret = getSigningSecret();
+
+    const permit = durableStore.issuePermit({
+      permit_id: permitId,
+      submission_id,
+      subject_id,
+      authority,
+      scope,
+      policy_hash,
+      secret
+    });
+
+    res.status(201).json(permit);
+  } catch (err: any) {
+    const status = err.name === 'PowerStateTransitionError' ? 403 : 400;
+    res.status(status).json({ error: err.name, message: err.message });
+  }
+});
+
+// Escrow Setup
+app.post('/api/escrow/init', (req, res) => {
+  try {
+    const { account_id = 'ESCROW-CIVIC-01', subject_id = 'CIVIC-COMMUNITY-01', initial_balance = 50000, currency = 'COMMONS' } = req.body;
+    const account = durableStore.getOrCreateEscrow(account_id, subject_id, Number(initial_balance), currency);
+    res.status(201).json(account);
+  } catch (err: any) {
+    res.status(400).json({ error: err.name, message: err.message });
+  }
+});
+
+// FAIL-CLOSED ESCROW DISBURSEMENT (ΔC = 0 Gate with Dual-State Cryptographic Receipt)
+app.post('/api/escrow/:id/disburse', (req, res) => {
+  try {
+    const accountId = req.params.id;
+    const {
+      operation_id,
+      subject_id,
+      worker_id,
+      steward_permit_id,
+      beneficiary_id,
+      amount,
+      currency = 'COMMONS',
+      policy_hash
+    } = req.body;
+
+    if (!operation_id || !subject_id || !worker_id || !steward_permit_id || !beneficiary_id || !amount || !policy_hash) {
+      return res.status(400).json({
+        error: 'MissingMandatoryFieldsError',
+        message: 'Disbursement rejected: operation_id, subject_id, worker_id, steward_permit_id, beneficiary_id, amount, and policy_hash are strictly mandatory. ΔC = 0.'
+      });
+    }
+
+    const secret = getSigningSecret();
+
+    const result = durableStore.disburseEscrowWithDualStateReceipt({
+      operation_id,
+      account_id: accountId,
+      subject_id,
+      worker_id,
+      steward_permit_id,
+      beneficiary_id,
+      amount: Number(amount),
+      currency,
+      policy_hash,
+      secret
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Escrow disbursed through verified consequence sink with dual-state receipt.',
+      receipt: result.receipt,
+      disbursement: result.disbursement
+    });
+  } catch (err: any) {
+    let statusCode = 400;
+    if (err.name === 'CrossSubjectBindingError') statusCode = 403;
+    else if (err.name === 'PowerStateTransitionError') statusCode = 403;
+    else if (err.name === 'StalePermitError') statusCode = 409;
+    else if (err.name === 'InsufficientBalanceError') statusCode = 422;
+    else if (err.name === 'InvalidPermitError') statusCode = 401;
+
+    res.status(statusCode).json({
+      error: err.name,
+      message: err.message,
+      delta_c: 0,
+      consequence_permission: 'DENIED'
+    });
+  }
+});
+
+// Institutional Disclosure Query ("Understanding Packet" for Banks & Regulators)
+app.get('/api/disclosure/understanding-packet/:subjectId', (req, res) => {
+  try {
+    const subjectId = req.params.subjectId;
+    const fields = req.query.fields
+      ? (req.query.fields as string).split(',')
+      : ['commitments', 'permits', 'receipts', 'evidence', 'data_sources_and_limitations', 'ledger_proof'];
+    const packet = durableStore.generateUnderstandingPacket(subjectId, fields);
+    res.json({
+      success: true,
+      packet
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.name, message: err.message });
+  }
+});
+
+// --- Delivery Evidence Layer (Layer 4) ---
+app.post('/api/evidence/attach', (req, res) => {
+  try {
+    const {
+      commitment_id,
+      subject_id = 'CIVIC-COMMUNITY-01',
+      steward_id = 'WORKER-STEWARD-01',
+      evidence_type = 'INSPECTION_REPORT',
+      title,
+      description,
+      dataset_id,
+      file_hash,
+      evidence_url = 'https://civictrust.network/evidence/default.pdf',
+      status = 'VERIFIED'
+    } = req.body;
+
+    if (!commitment_id || !title || !description || !file_hash) {
+      return res.status(400).json({
+        error: 'MissingMandatoryEvidenceFields',
+        message: 'commitment_id, title, description, and file_hash are required.'
+      });
+    }
+
+    const record = durableStore.recordEvidence({
+      commitment_id,
+      subject_id,
+      steward_id,
+      evidence_type,
+      title,
+      description,
+      dataset_id,
+      file_hash,
+      evidence_url,
+      status
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'Delivery evidence anchored into durable ledger.',
+      evidence: record
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.name, message: err.message });
+  }
+});
+
+app.get('/api/evidence', (req, res) => {
+  const commitmentId = req.query.commitment_id as string | undefined;
+  const subjectId = req.query.subject_id as string | undefined;
+  const list = durableStore.getEvidence(commitmentId, subjectId);
+  res.json({ count: list.length, evidence: list });
+});
+
+// --- Dataset Provenance Layer ---
+app.get('/api/provenance', (req, res) => {
+  const list = durableStore.getDatasetProvenance();
+  res.json({ count: list.length, provenance: list });
+});
+
+// --- Agentic AI Capacity Discovery & Coordination Service ---
+// Applies Skill 2.0 Invariant 2: ExecutionContinuity != ConsequenceAuthority
+app.post('/api/agent/discover-capacity', (req, res) => {
+  const { need_description = 'Community Solar Installation', subject_id = 'CIVIC-COMMUNITY-01' } = req.body;
+
+  const subject = durableStore.getSubject(subject_id);
+  const commitments = durableStore.getCommitments('POOL-LUSAKA-SOLAR-01');
+  const provenance = durableStore.getDatasetProvenance();
+
+  const proposal = {
+    agent: 'Veklom-CivicTrust Agentic Capacity Coordinator v1.0',
+    requested_need: need_description,
+    target_subject: subject_id,
+    power_state: subject?.power_state || 'D0',
+    discovered_resources: {
+      available_pool: 'POOL-LUSAKA-SOLAR-01 (Chilenje Market Clean Energy Commons)',
+      matched_artisan: 'BUILDRIGHT CONSTRUCTION LIMITED (NCC Grade C1, Registered)',
+      estimated_vouchers_needed: 4000,
+      currency: 'COMMONS',
+      baseline_dataset: provenance[0]?.title || 'Lusaka Built Environment Baseline',
+      required_policy_hash: 'sha256-policy-clean-solar-verified'
+    },
+    consequence_firewall: {
+      invariant: 'Identity Continuity != Authority Continuity; Execution Continuity != Consequence Authority',
+      ai_permission: 'PLAN_PROPOSAL_ONLY',
+      consequence_authority: 'DENIED (AI Agent cannot disburse treasury funds)',
+      required_next_step: 'Human Community Steward must inspect plan and issue cryptographically signed statutory permit'
+    },
+    recommended_plan: [
+      { step: 1, action: 'Register Community Commitment in POOL-LUSAKA-SOLAR-01', amount: 4000 },
+      { step: 2, action: 'Council Steward signs Statutory Permit under active Monotonic Epoch' },
+      { step: 3, action: 'Execute Escrow Disbursement with Dual-State Receipt' },
+      { step: 4, action: 'Attach Completion Inspection Report & Geotagged Photos to Delivery Evidence' },
+      { step: 5, action: 'Generate Bank/Funder Understanding Packet' }
+    ]
   };
 
-  DB.payments.set(invoice.submission_id, payment);
-  invoice.status = 'PAID';
-
-  await appendToLedger('STATUTORY_PAYMENT_SETTLED', {
-    payment_id: payment.id,
-    invoice_id: invoice.id,
-    amount: payment.amount,
-    method
+  res.json({
+    success: true,
+    proposal
   });
-
-  await emitCloudEvent(
-    Topics.PaymentCompleted,
-    'zape/payment-service',
-    invoice.submission_id,
-    payment
-  );
-
-  res.status(201).json(payment);
 });
+
 
 // --- Service 7: Contractor & NCC Service ---
 app.post('/api/contractors/bind/:submissionId', async (req, res) => {
@@ -1393,6 +1767,30 @@ app.post('/api/graphql', async (req, res) => {
     return res.json({ data: { ledger: DB.ledger } });
   }
 
+  if (cleaned.includes('understandingPacket')) {
+    const subId = variables.subjectId || (cleaned.match(/subjectId:\s*"([^"]+)"/) || [])[1] || 'CIVIC-COMMUNITY-01';
+    const packet = durableStore.generateUnderstandingPacket(subId);
+    return res.json({ data: { understandingPacket: packet } });
+  }
+
+  if (cleaned.includes('capabilities') || cleaned.includes('whatCanIDoRightNow')) {
+    const subId = variables.subjectId || (cleaned.match(/subjectId:\s*"([^"]+)"/) || [])[1] || 'CIVIC-COMMUNITY-01';
+    const subject = durableStore.getSubject(subId);
+    return res.json({
+      data: {
+        capabilities: {
+          subject_id: subId,
+          power_state: subject?.power_state || 'D0',
+          current_epoch: subject?.current_epoch || 1,
+          authority_granted: subject?.power_state === 'D0',
+          can_propose: true,
+          can_mutate: subject?.power_state === 'D0',
+          governance_model: 'Veklom Continuity Framework (Fail-Closed ΔC=0)'
+        }
+      }
+    });
+  }
+
   if (cleaned.includes('cloudEvents') || cleaned.includes('events')) {
     return res.json({ data: { events: eventLog.slice(0, 50) } });
   }
@@ -1400,9 +1798,9 @@ app.post('/api/graphql', async (req, res) => {
   // Fallback response with system summary
   res.json({
     data: {
-      systemStatus: 'ZAPE GraphQL Gateway Online',
+      systemStatus: 'ZAPE GraphQL Gateway Online (Hardened Durable Architecture)',
       projectsCount: DB.projects.size,
-      ledgerBlocks: DB.ledger.length,
+      ledgerBlocks: durableStore.getLedgerBlocks(100).length,
       kafkaEvents: eventLog.length
     }
   });
@@ -1414,7 +1812,26 @@ app.get('/api/events', (req, res) => {
 });
 
 app.get('/api/ledger', (req, res) => {
-  res.json({ count: DB.ledger.length, ledger: DB.ledger });
+  const limit = req.query.limit ? parseInt(req.query.limit as string) : 100;
+  const cursor = req.query.cursor ? parseInt(req.query.cursor as string) : 0;
+  const blocks = durableStore.getLedgerBlocks(Math.min(limit, 100), cursor);
+  const verification = durableStore.verifyLedgerChain();
+  
+  res.json({
+    count: blocks.length,
+    verification,
+    cursor: blocks.length > 0 ? blocks[blocks.length - 1].seq : null,
+    ledger: blocks
+  });
+});
+
+app.get('/api/ledger/verify', (req, res) => {
+  const verification = durableStore.verifyLedgerChain();
+  res.json({
+    success: true,
+    verification,
+    verified_at: new Date().toISOString()
+  });
 });
 
 app.get('/api/fiware/entities', (req, res) => {

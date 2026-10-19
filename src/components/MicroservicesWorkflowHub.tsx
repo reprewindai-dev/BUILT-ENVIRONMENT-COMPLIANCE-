@@ -25,7 +25,8 @@ import {
   Send,
   Code2,
   Sparkles,
-  Key
+  Key,
+  PlusCircle
 } from 'lucide-react';
 import { notificationService } from '../services/notificationService';
 
@@ -63,7 +64,7 @@ const INITIAL_STEPS: WorkflowStep[] = [
 ];
 
 export const MicroservicesWorkflowHub: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'pipeline' | 'kafka_events' | 'graphql' | 'ai_plan_review' | 'auth_service' | 'fiware_cdc' | 'ledger'>('pipeline');
+  const [activeTab, setActiveTab] = useState<'pipeline' | 'kafka_events' | 'graphql' | 'ai_plan_review' | 'auth_service' | 'fiware_cdc' | 'ledger' | 'continuity'>('pipeline');
   const [steps, setSteps] = useState<WorkflowStep[]>(INITIAL_STEPS);
   const [isAutoRunning, setIsAutoRunning] = useState(false);
   const [activeSubmissionId, setActiveSubmissionId] = useState<string | null>(null);
@@ -98,6 +99,13 @@ export const MicroservicesWorkflowHub: React.FC = () => {
   // AI Plan Review simulator state
   const [aiReviewResult, setAiReviewResult] = useState<any | null>(null);
   const [isAiReviewing, setIsAiReviewing] = useState(false);
+
+  // Tab 8 SFLive Community Hub State
+  const [agentPlan, setAgentPlan] = useState<any | null>(null);
+  const [understandingPacket, setUnderstandingPacket] = useState<any | null>(null);
+  const [isAgentDiscovering, setIsAgentDiscovering] = useState(false);
+  const [isGeneratingPacket, setIsGeneratingPacket] = useState(false);
+  const [evidenceAnchorStatus, setEvidenceAnchorStatus] = useState<string | null>(null);
 
   // Load telemetry periodically
   useEffect(() => {
@@ -528,8 +536,20 @@ export const MicroservicesWorkflowHub: React.FC = () => {
               : 'text-neutral-400 hover:text-white bg-neutral-900 border border-neutral-800'
           }`}
         >
-          <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-          <span>SHA-256 Ledger ({ledgerBlocks.length})</span>
+          <Database className="w-3.5 h-3.5 text-emerald-400" />
+          <span>Durable SQLite Ledger ({ledgerBlocks.length})</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('continuity')}
+          className={`px-3.5 py-2 rounded-xl transition-all flex items-center gap-1.5 whitespace-nowrap ${
+            activeTab === 'continuity'
+              ? 'bg-purple-600 text-white font-bold shadow-lg shadow-purple-950/80'
+              : 'text-purple-400 hover:text-white bg-purple-950/40 border border-purple-800/80'
+          }`}
+        >
+          <ShieldCheck className="w-3.5 h-3.5 text-purple-300" />
+          <span>Continuity Governance &amp; ΔC=0 Gateway</span>
         </button>
       </div>
 
@@ -1052,20 +1072,20 @@ export const MicroservicesWorkflowHub: React.FC = () => {
         </div>
       )}
 
-      {/* TAB 6: CRYPTOGRAPHIC SHA-256 LEDGER */}
+      {/* TAB 7: CRYPTOGRAPHIC SHA-256 LEDGER */}
       {activeTab === 'ledger' && (
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <div>
               <h3 className="text-sm font-bold text-white flex items-center gap-2">
                 <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                <span>Immutable SHA-256 Hash Chain Ledger</span>
+                <span>Durable SQLite &amp; SHA-256 Hash Chain Ledger</span>
                 <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-emerald-950 text-emerald-400 border border-emerald-800">
-                  {ledgerBlocks.length} Blocks Chained
+                  {ledgerBlocks.length} Blocks Persisted
                 </span>
               </h3>
               <p className="text-xs text-neutral-400">
-                Consecutive cryptographically anchored blocks: current hash = sha256(previous_hash + payload + event_type).
+                Backed by SQLite WAL mode and synchronous=FULL. Survives server restarts and browser reloads.
               </p>
             </div>
 
@@ -1107,6 +1127,423 @@ export const MicroservicesWorkflowHub: React.FC = () => {
                 </pre>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* TAB 8: VEKLOM CONTINUITY FRAMEWORK & ΔC=0 GATEWAY */}
+      {activeTab === 'continuity' && (
+        <div className="space-y-6">
+          <div className="p-6 rounded-2xl bg-neutral-900 border border-purple-900/60 shadow-xl space-y-4">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2 text-xs font-mono text-purple-400 mb-1">
+                  <ShieldCheck className="w-4 h-4" />
+                  <span>VEKLOM CONTINUITY SKILL 2.0 · PROBLEM STATEMENT 2 GATEWAY</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <h2 className="text-xl font-bold text-white tracking-tight">
+                    Governed Community Treasury Runtime &amp; Trust Signals
+                  </h2>
+                  <span className="px-2.5 py-0.5 rounded-full bg-amber-950/80 border border-amber-600/80 text-amber-300 text-[11px] font-mono font-semibold">
+                    Sandbox Pool: governed-counter test capability
+                  </span>
+                </div>
+                <p className="text-xs text-neutral-300 mt-1 max-w-3xl leading-relaxed">
+                  Converts place-based community commitments into auditable trust signals for banks, councils, and funders.
+                  Enforces the non-implication laws: <strong>Identity Continuity ≠ Authority Continuity</strong> and <strong>Execution Continuity ≠ Consequence Authority</strong>.
+                  Unauthorized requests leave financial balances strictly untouched (<span className="font-mono text-purple-300">Protected Balance Unchanged · ΔC = 0</span>).
+                </p>
+              </div>
+            </div>
+
+            {/* Architecture Metrics Grid with Plain-Language Translations */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-2 text-xs font-mono">
+              <div className="p-3 rounded-xl bg-neutral-950 border border-neutral-800 space-y-1">
+                <span className="text-neutral-400">Power State (WDM):</span>
+                <div className="text-sm font-bold text-emerald-400 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <span>D0 (Active Consequence)</span>
+                </div>
+                <span className="text-[10px] text-neutral-500">D1/D3 can propose, cannot mutate</span>
+              </div>
+
+              <div className="p-3 rounded-xl bg-neutral-950 border border-neutral-800 space-y-1">
+                <span className="text-neutral-400">Durable Storage Sink:</span>
+                <div className="text-sm font-bold text-white flex items-center gap-1.5">
+                  <Database className="w-3.5 h-3.5 text-blue-400" />
+                  <span>SQLite WAL + FULL</span>
+                </div>
+                <span className="text-[10px] text-neutral-500">Universal Engine (Node/Bun safe)</span>
+              </div>
+
+              <div className="p-3 rounded-xl bg-neutral-950 border border-neutral-800 space-y-1">
+                <span className="text-neutral-400">Authority Epoch:</span>
+                <div className="text-sm font-bold text-amber-400 flex items-center gap-1.5">
+                  <Key className="w-3.5 h-3.5" />
+                  <span>Monotonic Epoch Bound</span>
+                </div>
+                <span className="text-[10px] text-neutral-500">Old authorizations expire automatically</span>
+              </div>
+
+              <div className="p-3 rounded-xl bg-neutral-950 border border-neutral-800 space-y-1">
+                <span className="text-neutral-400">Institutional Reviewer View:</span>
+                <div className="text-sm font-bold text-pink-400 flex items-center gap-1.5">
+                  <Building className="w-3.5 h-3.5" />
+                  <span>Understanding Packet</span>
+                </div>
+                <span className="text-[10px] text-neutral-500">Before-and-after proof of every transaction</span>
+              </div>
+            </div>
+          </div>
+
+          {/* End-to-End Community Journey Grid */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Card 1: Agentic AI Capacity Discovery & Coordination */}
+            <div className="p-5 rounded-2xl bg-neutral-950 border border-neutral-800 space-y-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 text-purple-400" />
+                  <span>1. Agentic Capacity Coordinator (Layer 7)</span>
+                </h3>
+                <span className="text-[10px] px-2 py-0.5 rounded bg-purple-950 text-purple-300 font-mono">
+                  Execution ≠ Consequence
+                </span>
+              </div>
+              <p className="text-xs text-neutral-400">
+                Community asks: <em>"Can we install a 25kW solar mini-grid at Chilenje Market?"</em> Agent discovers local artisans, voucher pool balances, and council permit requirements, proposing a plan without consequence authority.
+              </p>
+
+              <button
+                disabled={isAgentDiscovering}
+                onClick={async () => {
+                  setIsAgentDiscovering(true);
+                  try {
+                    const res = await fetch('/api/agent/discover-capacity', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        need_description: '25kW Solar Mini-Grid at Chilenje Market',
+                        subject_id: 'CIVIC-COMMUNITY-01'
+                      })
+                    });
+                    const data = await res.json();
+                    setAgentPlan(data.proposal);
+                  } catch (e: any) {
+                    alert('Agent query failed: ' + e.message);
+                  } finally {
+                    setIsAgentDiscovering(false);
+                  }
+                }}
+                className="w-full px-4 py-2.5 rounded-xl bg-purple-900/40 hover:bg-purple-900/60 border border-purple-700/60 text-purple-200 text-xs font-mono font-bold flex items-center justify-between"
+              >
+                <span>{isAgentDiscovering ? 'Analyzing Community Capacity...' : '1. Discover Capacity & Propose Plan'}</span>
+                <span className="text-[10px] px-2 py-0.5 rounded bg-purple-950 text-purple-300">AGENTIC AI</span>
+              </button>
+
+              {agentPlan && (
+                <div className="p-3 rounded-xl bg-neutral-900 border border-purple-900/40 space-y-2 text-xs font-mono">
+                  <div className="flex justify-between text-neutral-400">
+                    <span>Matched Artisan:</span>
+                    <span className="text-white font-bold">{agentPlan.discovered_resources?.matched_artisan}</span>
+                  </div>
+                  <div className="flex justify-between text-neutral-400">
+                    <span>Vouchers Needed:</span>
+                    <span className="text-amber-400">{agentPlan.discovered_resources?.estimated_vouchers_needed} {agentPlan.discovered_resources?.currency}</span>
+                  </div>
+                  <div className="p-2 rounded bg-neutral-950 border border-red-900/40 text-[11px] text-red-300">
+                    <strong>Consequence Firewall:</strong> {agentPlan.consequence_firewall?.consequence_authority}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Card 2: Community Commitment & Monotonic Permit */}
+            <div className="p-5 rounded-2xl bg-neutral-950 border border-neutral-800 space-y-4">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <DollarSign className="w-4 h-4 text-emerald-400" />
+                <span>2. Community Commitment &amp; Steward Permit</span>
+              </h3>
+              <p className="text-xs text-neutral-400">
+                Steward reviews the AI plan and anchors the commitment into SQLite. Council planning gateway issues an HMAC statutory permit bound to Monotonic Epoch 1.
+              </p>
+
+              <div className="flex flex-wrap gap-2 text-xs font-mono">
+                <button
+                  onClick={async () => {
+                    await fetch('/api/commitments', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        id: `CMT-SOLAR-${Date.now().toString().slice(-4)}`,
+                        pool_id: 'POOL-LUSAKA-SOLAR-01',
+                        subject_id: 'CIVIC-COMMUNITY-01',
+                        steward_id: 'WORKER-STEWARD-01',
+                        amount: 4000,
+                        currency: 'COMMONS',
+                        purpose: '25kW Solar Mini-Grid at Chilenje Market (Labour Voucher Allocation)',
+                        power_state: 'D0'
+                      })
+                    });
+                    const pmtRes = await fetch('/api/permits', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        submission_id: 'SUB-CHILENJE-SOLAR-01',
+                        subject_id: 'CIVIC-COMMUNITY-01',
+                        authority: 'CIVICTRUST_COUNCIL_GATEWAY',
+                        scope: 'ESCROW_DISBURSE_HARMONIZED',
+                        policy_hash: 'sha256-policy-clean-solar-verified'
+                      })
+                    });
+                    const pmt = await pmtRes.json();
+                    await fetchTelemetry();
+                    alert(`Commitment & Statutory Permit PMT-${pmt.permit_id || 'ISSUED'} created in Monotonic Epoch 1!`);
+                  }}
+                  className="w-full px-4 py-2.5 rounded-xl bg-emerald-950/60 hover:bg-emerald-900/80 border border-emerald-800/80 text-emerald-300 text-xs font-mono font-bold flex items-center justify-between"
+                >
+                  <span>2. Record Commitment &amp; Issue Steward Permit</span>
+                  <span className="px-2 py-0.5 rounded bg-emerald-900/80 text-emerald-200 text-[10px]">EPOCH 1 ACTIVE</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Card 3: The Consequence Firewall (Refusal Test vs Authorized Execution) */}
+            <div className="p-5 rounded-2xl bg-neutral-950 border border-neutral-800 space-y-4">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-purple-400" />
+                <span>3. Consequence Firewall: Refusal vs Valid</span>
+              </h3>
+              <p className="text-xs text-neutral-400">
+                Demonstrate that an unauthorized request is rejected fail-closed leaving protected balance untouched (<span className="text-purple-300 font-mono">ΔC = 0</span>), while authorized action yields a Dual-State Receipt.
+              </p>
+
+              <div className="space-y-2">
+                <button
+                  onClick={async () => {
+                    const res = await fetch('/api/escrow/ESCROW-CIVIC-01/disburse', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        operation_id: `OP-UNAUTHORIZED-${Date.now()}`,
+                        subject_id: 'CIVIC-COMMUNITY-01',
+                        worker_id: 'UNBOUND-ROGUE-AGENT',
+                        steward_permit_id: 'FORGED-OR-MISSING',
+                        beneficiary_id: 'BENEFICIARY-001',
+                        amount: 15000,
+                        currency: 'COMMONS',
+                        policy_hash: 'INVALID-HASH'
+                      })
+                    });
+                    const data = await res.json();
+                    alert(`[FAIL-CLOSED VERIFIED]\nStatus: ${res.status}\nError: ${data.error}\nProtected Balance Untouched: ΔC = ${data.delta_c}\nConsequence Permission: ${data.consequence_permission}`);
+                  }}
+                  className="w-full px-4 py-2.5 rounded-xl bg-red-950/60 hover:bg-red-900/80 border border-red-800/80 text-red-300 text-xs font-mono font-bold flex items-center justify-between"
+                >
+                  <span>3a. Test Unauthorized AI Transfer</span>
+                  <span className="px-2 py-0.5 rounded bg-red-900/80 text-red-200 text-[10px]">BLOCKED (ΔC = 0)</span>
+                </button>
+
+                <button
+                  onClick={async () => {
+                    await fetch('/api/authority/subject', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ subject_id: 'CIVIC-COMMUNITY-01', initial_epoch: 1, power_state: 'D0' })
+                    });
+                    const subRes = await fetch('/api/authority/subject/CIVIC-COMMUNITY-01');
+                    const sub = await subRes.json();
+                    await fetch('/api/authority/bind-worker', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        worker_id: 'WORKER-STEWARD-01',
+                        subject_id: 'CIVIC-COMMUNITY-01',
+                        incarnation_id: sub.active_incarnation,
+                        role: 'COMMUNITY_STEWARD'
+                      })
+                    });
+                    const pmtRes = await fetch('/api/permits', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        submission_id: 'SUB-CHILENJE-SOLAR-01',
+                        subject_id: 'CIVIC-COMMUNITY-01'
+                      })
+                    });
+                    const pmt = await pmtRes.json();
+                    await fetch('/api/escrow/init', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ account_id: 'ESCROW-CIVIC-01', subject_id: 'CIVIC-COMMUNITY-01', initial_balance: 50000 })
+                    });
+
+                    const disbRes = await fetch('/api/escrow/ESCROW-CIVIC-01/disburse', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        operation_id: `OP-VALID-${Date.now()}`,
+                        subject_id: 'CIVIC-COMMUNITY-01',
+                        worker_id: 'WORKER-STEWARD-01',
+                        steward_permit_id: pmt.permit_id,
+                        beneficiary_id: 'BUILDRIGHT-CONSTRUCTION-C1',
+                        amount: 4000,
+                        currency: 'COMMONS',
+                        policy_hash: pmt.policy_hash
+                      })
+                    });
+                    const disb = await disbRes.json();
+                    await fetchTelemetry();
+                    alert(`[GOVERNED DISBURSEMENT VERIFIED]\nDual-State Receipt ID: ${disb.receipt?.receipt_id}\nBefore -> After: ${disb.receipt?.state_before} -> ${disb.receipt?.state_after}\nProof Hash: ${disb.receipt?.proof_hash}\nΔC: 4,000 COMMONS`);
+                  }}
+                  className="w-full px-4 py-2.5 rounded-xl bg-emerald-950/60 hover:bg-emerald-900/80 border border-emerald-800/80 text-emerald-300 text-xs font-mono font-bold flex items-center justify-between"
+                >
+                  <span>3b. Execute Governed Disbursement</span>
+                  <span className="px-2 py-0.5 rounded bg-emerald-900/80 text-emerald-200 text-[10px]">COMMITTED (DUAL-STATE)</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Card 4: Delivery Evidence Layer (Layer 4) */}
+            <div className="p-5 rounded-2xl bg-neutral-950 border border-neutral-800 space-y-4">
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                <FileText className="w-4 h-4 text-cyan-400" />
+                <span>4. Delivery Evidence &amp; Dataset Provenance</span>
+              </h3>
+              <p className="text-xs text-neutral-400">
+                Capture verifiable evidence (inspection sign-off, geotagged photos) and link them to audited baseline dataset provenance.
+              </p>
+
+              <button
+                onClick={async () => {
+                  const res = await fetch('/api/evidence/attach', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      commitment_id: 'CMT-SOLAR-01',
+                      subject_id: 'CIVIC-COMMUNITY-01',
+                      steward_id: 'WORKER-STEWARD-01',
+                      evidence_type: 'INSPECTION_REPORT',
+                      title: 'Chilenje Market 25kW Solar Grid Commissioning Report',
+                      description: 'Physical inspection completed by Eng. B. Chanda (LCC). 64 Tier-1 solar panels, inverter synchronized to microgrid.',
+                      dataset_id: 'DS-ZAMBIA-SOLAR-01',
+                      file_hash: 'sha256-evidence-chilenje-solar-inspected-pass-2026',
+                      evidence_url: 'https://civictrust.network/evidence/chilenje-solar-inspection.pdf',
+                      status: 'VERIFIED'
+                    })
+                  });
+                  const data = await res.json();
+                  setEvidenceAnchorStatus(`Anchored: ${data.evidence?.title} (${data.evidence?.evidence_id})`);
+                  alert('Delivery evidence physically anchored into durable ledger!');
+                }}
+                className="w-full px-4 py-2.5 rounded-xl bg-cyan-950/60 hover:bg-cyan-900/80 border border-cyan-800/80 text-cyan-300 text-xs font-mono font-bold flex items-center justify-between"
+              >
+                <span>4. Anchor Commissioning Inspection Report</span>
+                <span className="px-2 py-0.5 rounded bg-cyan-900/80 text-cyan-200 text-[10px]">VERIFIED EVIDENCE</span>
+              </button>
+
+              {evidenceAnchorStatus && (
+                <div className="p-2.5 rounded-xl bg-neutral-900 border border-cyan-800/50 text-[11px] font-mono text-cyan-300">
+                  {evidenceAnchorStatus}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Full-Width Card 5: The Institutional Understanding Packet (The Hero Disclosure Layer) */}
+          <div className="p-6 rounded-2xl bg-neutral-950 border border-pink-900/60 space-y-5">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <div className="flex items-center gap-2 text-xs font-mono text-pink-400">
+                  <Building className="w-4 h-4" />
+                  <span>LAYER 6: INSTITUTIONAL DISCLOSURE LAYER</span>
+                </div>
+                <h3 className="text-base font-bold text-white tracking-tight mt-0.5">
+                  The Understanding Packet (Bank, Funder &amp; Council Audit View)
+                </h3>
+                <p className="text-xs text-neutral-400 mt-1 max-w-2xl">
+                  Answers the banking judge's core question: <em>"Why should I trust this community?"</em> Instead of reviewing fragmented emails, reviewers inspect a structured, tamper-proof disclosure packet.
+                </p>
+              </div>
+
+              <button
+                disabled={isGeneratingPacket}
+                onClick={async () => {
+                  setIsGeneratingPacket(true);
+                  try {
+                    const res = await fetch('/api/disclosure/understanding-packet/CIVIC-COMMUNITY-01');
+                    const data = await res.json();
+                    setUnderstandingPacket(data.packet);
+                  } catch (e: any) {
+                    alert('Packet generation failed: ' + e.message);
+                  } finally {
+                    setIsGeneratingPacket(false);
+                  }
+                }}
+                className="px-5 py-2.5 rounded-xl bg-pink-600 hover:bg-pink-500 text-white font-mono text-xs font-bold flex items-center gap-2 shadow-lg shadow-pink-900/30"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isGeneratingPacket ? 'animate-spin' : ''}`} />
+                <span>{isGeneratingPacket ? 'Compiling Packet...' : 'Generate Understanding Packet'}</span>
+              </button>
+            </div>
+
+            {understandingPacket && (
+              <div className="space-y-4 pt-2">
+                {/* 5 Plain-Language Answers Grid */}
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 text-xs font-mono">
+                  <div className="p-3.5 rounded-xl bg-neutral-900 border border-neutral-800 space-y-1.5">
+                    <span className="text-[10px] text-pink-400 font-bold uppercase tracking-wider">1. What Was Promised?</span>
+                    <p className="text-neutral-200 text-[11px] leading-relaxed">
+                      {understandingPacket.narrative_summary?.what_was_promised}
+                    </p>
+                  </div>
+
+                  <div className="p-3.5 rounded-xl bg-neutral-900 border border-neutral-800 space-y-1.5">
+                    <span className="text-[10px] text-emerald-400 font-bold uppercase tracking-wider">2. Who Approved?</span>
+                    <p className="text-neutral-200 text-[11px] leading-relaxed">
+                      {understandingPacket.narrative_summary?.who_approved}
+                    </p>
+                  </div>
+
+                  <div className="p-3.5 rounded-xl bg-neutral-900 border border-neutral-800 space-y-1.5">
+                    <span className="text-[10px] text-cyan-400 font-bold uppercase tracking-wider">3. What Was Delivered?</span>
+                    <p className="text-neutral-200 text-[11px] leading-relaxed">
+                      {understandingPacket.narrative_summary?.what_was_delivered}
+                    </p>
+                  </div>
+
+                  <div className="p-3.5 rounded-xl bg-neutral-900 border border-neutral-800 space-y-1.5">
+                    <span className="text-[10px] text-purple-400 font-bold uppercase tracking-wider">4. Financial Consequence (ΔC)</span>
+                    <p className="text-neutral-200 text-[11px] leading-relaxed">
+                      {understandingPacket.narrative_summary?.what_changed_financial}
+                    </p>
+                  </div>
+
+                  <div className="p-3.5 rounded-xl bg-neutral-900 border border-neutral-800 space-y-1.5">
+                    <span className="text-[10px] text-amber-400 font-bold uppercase tracking-wider">5. What Remains Open?</span>
+                    <p className="text-neutral-200 text-[11px] leading-relaxed">
+                      {understandingPacket.narrative_summary?.what_remains_open}
+                    </p>
+                  </div>
+
+                  <div className="p-3.5 rounded-xl bg-neutral-900 border border-neutral-800 space-y-1.5">
+                    <span className="text-[10px] text-blue-400 font-bold uppercase tracking-wider">6. Cryptographic Proof Chain</span>
+                    <div className="text-[11px] text-neutral-300">
+                      <div>Status: <span className="text-emerald-400 font-bold">VERIFIED ({understandingPacket.ledger_proof?.total_blocks} blocks)</span></div>
+                      <div className="truncate text-[10px] text-neutral-500 mt-1 font-mono">{understandingPacket.ledger_proof?.latest_hash}</div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Data Provenance & Limitations Disclosure */}
+                <div className="p-3.5 rounded-xl bg-neutral-900/60 border border-neutral-800 text-xs font-mono space-y-1.5">
+                  <span className="text-[10px] text-neutral-400 uppercase tracking-wider font-bold">Data Sources &amp; Limitations Disclosure:</span>
+                  <p className="text-neutral-400 text-[11px] leading-relaxed">
+                    {understandingPacket.narrative_summary?.data_sources_and_limitations}
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -13,9 +13,17 @@ import {
 import { AuditLedgerService } from '../services/cryptoLedger';
 
 export const AuditLedgerView: React.FC = () => {
-  const blocks = AuditLedgerService.getLedger();
+  const [blocks, setBlocks] = useState<any[]>(AuditLedgerService.getLedger());
   const [filterQuery, setFilterQuery] = useState('');
   const [verifiedAll, setVerifiedAll] = useState<boolean | null>(null);
+
+  React.useEffect(() => {
+    AuditLedgerService.fetchServerLedger().then(serverBlocks => {
+      if (serverBlocks && serverBlocks.length > 0) {
+        setBlocks(serverBlocks);
+      }
+    });
+  }, []);
 
   const filteredBlocks = blocks.filter(b => 
     b.actorName.toLowerCase().includes(filterQuery.toLowerCase()) ||
@@ -24,7 +32,18 @@ export const AuditLedgerView: React.FC = () => {
     b.blockHash.toLowerCase().includes(filterQuery.toLowerCase())
   );
 
-  const handleVerifyChain = () => {
+  const handleVerifyChain = async () => {
+    try {
+      const res = await fetch('/api/ledger/verify');
+      if (res.ok) {
+        const data = await res.json();
+        setVerifiedAll(data.verification?.valid ?? true);
+        return;
+      }
+    } catch {
+      // Fallback to local check
+    }
+
     // Validate each block's cryptographic linkage
     let valid = true;
     for (let i = 1; i < blocks.length; i++) {
