@@ -407,9 +407,9 @@ export class DurableStore {
         retrieval_timestamp: '2026-10-18T10:00:00.000Z',
         snapshot_digest: '4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b',
         permission_terms: 'Community Commons Mutual Credit Agreement v1.0',
-        data_classification: 'COMMUNITY_VERIFIED',
+        data_classification: 'SYNTHETIC_FIXTURE',
         coverage_summary: 'Community labour vouchers, local artisan bindings, escrow reserve governance',
-        limitations: 'Subject to steward approval permits; non-transferable outside affiliated community pool.',
+        limitations: 'Demonstration fixture calibrated to represent community labour voucher commitments; synthetic financial values and demonstration parameters.',
         approved_by: 'Francis Banda (CivicTrust Lead)',
         verification_status: 'APPROVED_FOR_DEMO',
         created_at: new Date().toISOString()

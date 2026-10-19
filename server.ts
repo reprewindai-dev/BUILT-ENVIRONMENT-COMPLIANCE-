@@ -1498,6 +1498,7 @@ app.post('/api/agent/discover-capacity', async (req, res) => {
 
   const proposal = {
     agent: 'Veklom-CivicTrust Agentic Capacity Coordinator v1.0',
+    proposal_mode: 'fixture-based-proposal-with-model-synthesis',
     ai_engine: aiEngine,
     llm_analysis: llmAnalysis,
     requested_need: need_description,
@@ -1509,7 +1510,8 @@ app.post('/api/agent/discover-capacity', async (req, res) => {
       estimated_vouchers_needed: 4000,
       currency: 'COMMONS',
       baseline_dataset: provenance[0]?.title || 'Lusaka Built Environment Baseline',
-      required_policy_hash: 'sha256-policy-clean-solar-verified'
+      required_policy_hash: 'sha256-policy-clean-solar-verified',
+      claim_boundary: 'Demonstration proposal based on calibrated synthetic fixtures; model provides real-time synthesis of need while matched resources are derived from calibrated demonstration fixtures.'
     },
     consequence_firewall: {
       invariant: 'Identity Continuity != Authority Continuity; Execution Continuity != Consequence Authority',
