@@ -1300,15 +1300,35 @@ app.get('/api/provenance', (req, res) => {
 
 // --- Agentic AI Capacity Discovery & Coordination Service ---
 // Applies Skill 2.0 Invariant 2: ExecutionContinuity != ConsequenceAuthority
-app.post('/api/agent/discover-capacity', (req, res) => {
+app.post('/api/agent/discover-capacity', async (req, res) => {
   const { need_description = 'Community Solar Installation', subject_id = 'CIVIC-COMMUNITY-01' } = req.body;
 
   const subject = durableStore.getSubject(subject_id);
-  const commitments = durableStore.getCommitments('POOL-LUSAKA-SOLAR-01');
   const provenance = durableStore.getDatasetProvenance();
+
+  let aiEngine = 'deterministic-capacity-heuristic';
+  let llmAnalysis: string | null = null;
+
+  if (process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim() !== '') {
+    try {
+      const { GoogleGenAI } = await import('@google/genai');
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: `You are the CivicTrust Agentic Capacity Coordinator for a community commitment pool. Analyze this local need: "${need_description}". Synthesize: 1) Verified local artisan trade needed, 2) Estimated mutual voucher allocation in COMMONS currency, 3) Physical milestone inspection required.`
+      });
+      llmAnalysis = response.text || null;
+      aiEngine = 'google-genai/gemini-2.5-flash (live model)';
+    } catch (err: any) {
+      console.warn('[AI] Gemini call failed, using deterministic heuristic:', err.message);
+      aiEngine = `fallback-heuristic (Gemini error: ${err.message})`;
+    }
+  }
 
   const proposal = {
     agent: 'Veklom-CivicTrust Agentic Capacity Coordinator v1.0',
+    ai_engine: aiEngine,
+    llm_analysis: llmAnalysis,
     requested_need: need_description,
     target_subject: subject_id,
     power_state: subject?.power_state || 'D0',
@@ -1324,7 +1344,8 @@ app.post('/api/agent/discover-capacity', (req, res) => {
       invariant: 'Identity Continuity != Authority Continuity; Execution Continuity != Consequence Authority',
       ai_permission: 'PLAN_PROPOSAL_ONLY',
       consequence_authority: 'DENIED (AI Agent cannot disburse treasury funds)',
-      required_next_step: 'Human Community Steward must inspect plan and issue cryptographically signed statutory permit'
+      required_next_step: 'Human Community Steward must inspect plan and issue cryptographically signed statutory permit',
+      claim_boundary: 'Agentic AI coordinates allocations and identifies local resources; cannot mutate financial balances or sign permits without human steward epoch authority.'
     },
     recommended_plan: [
       { step: 1, action: 'Register Community Commitment in POOL-LUSAKA-SOLAR-01', amount: 4000 },

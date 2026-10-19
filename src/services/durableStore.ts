@@ -112,6 +112,7 @@ export interface DeliveryEvidence {
   file_hash: string;
   evidence_url: string;
   status: 'SUBMITTED' | 'VERIFIED' | 'CONTESTED';
+  claim_boundary: string;
   created_at: string;
 }
 
@@ -316,6 +317,7 @@ export class DurableStore {
         file_hash TEXT NOT NULL,
         evidence_url TEXT NOT NULL,
         status TEXT NOT NULL CHECK(status IN ('SUBMITTED', 'VERIFIED', 'CONTESTED')),
+        claim_boundary TEXT NOT NULL DEFAULT 'Records submitted evidence digest and metadata; does not independently establish physical delivery.',
         created_at TEXT NOT NULL
       );
 
@@ -844,12 +846,13 @@ export class DurableStore {
     const id = params.evidence_id || `EVD-${crypto.randomUUID().substring(0, 8).toUpperCase()}`;
     const status = params.status || 'SUBMITTED';
     const now = new Date().toISOString();
+    const claim_boundary = 'Records submitted evidence metadata and digest; does not independently establish physical delivery.';
 
     this.db.prepare(`
       INSERT INTO delivery_evidence (
         evidence_id, commitment_id, subject_id, steward_id, evidence_type,
-        title, description, dataset_id, file_hash, evidence_url, status, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        title, description, dataset_id, file_hash, evidence_url, status, claim_boundary, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       params.commitment_id,
@@ -862,6 +865,7 @@ export class DurableStore {
       params.file_hash,
       params.evidence_url,
       status,
+      claim_boundary,
       now
     );
 
@@ -877,6 +881,7 @@ export class DurableStore {
       file_hash: params.file_hash,
       evidence_url: params.evidence_url,
       status,
+      claim_boundary,
       created_at: now
     };
 
