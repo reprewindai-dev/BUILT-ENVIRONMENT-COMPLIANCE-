@@ -1,0 +1,97 @@
+=== CODEX VERIFIER PROTOCOL: PHYSICAL RUNTIME VERIFICATION ===
+=== (ZERO PRE-REGISTRATION / UNCOMPROMISING ADVERSARIAL AUDIT) ===
+
+1. [Adversarial] Attack with completely unregistered worker on empty database...
+   [PASS] Fail-closed: Caught typed CrossSubjectBindingError: Worker UNREGISTERED-ATTACKER-999 is not registered
+
+2. Registering legitimate Subject Authority in D0 state...
+   [PASS] Subject registered in D0 with incarnation: d1e366de3f67...
+
+2b. [Adversarial] Attack: Attempt duplicate registration of existing subject to overwrite epoch...
+   [PASS] Caught typed OperationConflictError: Subject CIVIC-COMMUNITY-01 is already registered with monotonic epoch 1. Overwrite is forbidden.
+   [PASS] Monotonic subject authority invariant verified: epoch remains 1.
+
+3. Binding legitimate Community Steward Worker & Recording Community Commitment...
+   [PASS] Worker binding recorded.
+   [PASS] Community Commitment CMT-SOLAR-01 recorded (4,000 COMMONS in POOL-LUSAKA-SOLAR-01).
+
+4. Initializing Escrow Account Sink with 20,000 COMMONS...
+   [PASS] Escrow account initialized with 20,000 COMMONS.
+
+5. [Adversarial] Attack with non-existent permit ID...
+   [PASS] Caught typed InvalidPermitError: Steward permit PMT-GHOST-404 not found
+   [PASS] Sink invariant verified: ΔC = 0 (Balance: 20000).
+
+6. Issuing genuine Monotonic Epoch Permit PMT-001...
+   [PASS] Permit PMT-001 issued with valid cryptographic HMAC signature.
+
+7. [Adversarial] Attack with forged cryptographic HMAC signature...
+   [PASS] Caught typed InvalidPermitError: Cryptographic permit signature invalid
+   [PASS] Cryptographic sink defense verified: ΔC = 0 (Balance: 20000).
+
+8. [Adversarial] Attack with greenwashing policy hash mismatch...
+   [PASS] Caught typed InvalidPermitError: Execution policy hash does not match signed permit policy hash
+   [PASS] Green policy boundary verified: ΔC = 0 (Balance: 20000).
+
+9. [Adversarial] Attack with overdraft exceeding escrow balance...
+   [PASS] Caught typed InsufficientBalanceError: Insufficient escrow balance: 20000 < 999999
+   [PASS] Financial sink guard verified: ΔC = 0 (Balance: 20000).
+
+9b. [Adversarial] Attack with negative, zero, and non-finite disbursement amounts...
+   [PASS] Strict positive finite amount invariant verified: ΔC = 0 (Balance: 20000).
+
+9c. [Adversarial] Attack: Disburse using permit with unauthorized scope (e.g. PLANNING_INSPECTION_ONLY)...
+   [PASS] Caught typed InvalidPermitError: Permit scope 'PLANNING_INSPECTION_ONLY' does not authorize escrow disbursement (required: ESCROW_DISBURSE_HARMONIZED)
+   [PASS] Permit scope authorization boundary verified: ΔC = 0 (Balance: 20000).
+
+9d. [Adversarial] Attack: Cross-subject escrow debit (Steward of Community B attempting to debit Community A escrow)...
+   [PASS] Caught typed CrossSubjectBindingError: Escrow account ESCROW-001 belongs to subject CIVIC-COMMUNITY-01, but request is authorized under subject CIVIC-COMMUNITY-02
+   [PASS] Escrow account isolation verified: cross-subject debit blocked, ΔC = 0 on both accounts.
+
+10. Executing Valid Governed Disbursement of 4,000 COMMONS...
+   [PASS] Dual-State Receipt verified: state_before 20000 -> state_after 16000 (ΔC = 4000).
+
+11. Testing Idempotency Boundary (Replaying OP-VALID-01)...
+   [PASS] Idempotency verified: identical receipt returned, balance remains 16000.
+
+11b. [Adversarial] Attack: Idempotent replay with altered payload (tampered beneficiary or amount)...
+   [PASS] Caught typed ReplayPayloadMismatchError: Operation ID OP-VALID-01 already committed with different disbursement parameters.
+   [PASS] Replay payload integrity verified: altered payload rejected, ΔC = 0.
+
+12. Testing Monotonic Epoch Advancement & Stale Permit Rejection...
+   [PASS] Caught typed StalePermitError: Permit epoch 1 is retired; subject epoch is 2
+   [PASS] Monotonic epoch boundary enforced (ΔC = 0).
+
+13. Testing Low-Power State Consequence Clamping (D3hot)...
+   [PASS] Caught typed PowerStateTransitionError: Subject is in D3hot; cannot issue D0 active commitment
+   [PASS] Low-power consequence clamping verified.
+
+14. Attaching Delivery Evidence (Commissioning Report & Photos)...
+   [PASS] Delivery evidence physically anchored: EVD-B5EE7C32
+
+14b. Delivery Evidence Segregation & Independent Audit Verification...
+   [PASS] Unverified steward evidence defaults to SUBMITTED: EVD-DA718006
+   [PASS] Independent officer audit transitioned evidence status to VERIFIED.
+
+15. Verifying Dataset Provenance & Limitations Audit...
+   [PASS] Dataset provenance verified (2 registered sources with explicit limitations).
+
+16. Verifying Hash-Chained SQLite Ledger Integrity...
+   [PASS] Ledger chain cryptographically verified: 14 consecutive blocks valid.
+
+17. Testing Complete Institutional Understanding Packet Generation...
+   [PASS] Bank/Funder Understanding Packet successfully generated:
+          - What Was Promised: [CMT-SOLAR-01] 25kW Solar Mini-Grid at Chilenje Market (Labour Voucher Allocation) (4000 COMMONS)
+          - Who Approved:      Permit PMT-001 authorized by CIVICTRUST_GATEWAY in Monotonic Epoch 1 (CONSUMED); Permit PMT-READONLY-01 authorized by CIVICTRUST_GATEWAY in Monotonic Epoch 1 (ACTIVE); Permit PMT-002 authorized by CIVICTRUST_GATEWAY in Monotonic Epoch 1 (ACTIVE)
+          - What Was Delivered:[PHOTO] Chilenje Market Rooftop Pre-Installation Photo: Initial site assessment photograph submitted by community steward. (VERIFIED; Boundary: Records submitted evidence metadata and digest; does not independently establish physical delivery.); [INSPECTION_REPORT] Chilenje Market 25kW Solar Grid Commissioning Report: Physical inspection completed by Eng. B. Chanda. 64 Tier-1 solar panels verified operational. (VERIFIED; Boundary: Records submitted evidence metadata and digest; does not independently establish physical delivery.)
+          - What Changed (ΔC): 1 dual-state receipt(s) verified. Total consequence disbursed: 4000 COMMONS. Current active balance: 16000.
+          - Dual-State Receipts Audited: 1
+          - Latest Proof Hash: c74fccd52a9ba2e244190f8e9fb11237af11cac1731d615becde9af1727aee83
+
+17b. Testing Consented Field Filtering in Understanding Packet (Data-Minimization)...
+   [PASS] Consented field filtering verified: unrequested receipts/permits masked, evidence counts segregated.
+
+18. Testing Process Restart & Cold-Boot Durability (New Store Instance)...
+   [PASS] Cold boot recovery verified: subject, epoch, escrow balance (16000), receipts, evidence, and ledger chain intact.
+
+>>> ALL 24 PHYSICAL RUNTIME INVARIANTS TESTED & VERIFIED WITH ZERO MOCKS! <<<

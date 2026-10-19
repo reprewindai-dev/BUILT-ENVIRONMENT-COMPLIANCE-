@@ -27,7 +27,13 @@ import { NotificationToastContainer } from './components/NotificationToast';
 
 export default function App() {
   const [activeRole, setActiveRole] = useState<ActorRole>('architect');
-  const [activeTab, setActiveTab] = useState<string>('overview');
+  const [activeTab, setActiveTab] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const p = new URLSearchParams(window.location.search).get('tab');
+      if (p) return p;
+    }
+    return 'overview';
+  });
   const [isOfflineMode, setIsOfflineMode] = useState<boolean>(false);
   const [pendingSyncCount, setPendingSyncCount] = useState<number>(0);
 
@@ -50,6 +56,10 @@ export default function App() {
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const urlParams = new URLSearchParams(window.location.search);
+      const tabParam = urlParams.get('tab');
+      if (tabParam) {
+        setActiveTab(tabParam);
+      }
       const verifyId = urlParams.get('verify') || urlParams.get('passport') || urlParams.get('plaque');
       if (verifyId) {
         setPlaqueVerifyQuery(verifyId);
